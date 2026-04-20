@@ -1,7 +1,7 @@
 import Foundation
 
 public enum BinarySampleCodec {
-    private static let floatCount = 31
+    public static let floatCount = 30
     private static let payloadLength = 8 + 4 + (floatCount * 4)
 
     public static func encode(_ sample: ProviderSamplePayload) -> Data {

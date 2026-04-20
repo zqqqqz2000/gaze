@@ -14,6 +14,7 @@
 - C++17 单一核心
 - C ABI 暴露给 macOS / Windows / Linux
 - 实现 `DisplayPose`、校准求解、quick refit、runtime solve
+- 提供 calibration blob 的稳定二进制序列化接口
 
 ### 3. Host Layer
 

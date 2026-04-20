@@ -17,6 +17,7 @@
 - `gaze_solve_point()` 屏幕求交与 residual 修正
 - `gaze_cal_*()` full calibration API
 - `gaze_refit_pose()` quick refit API
+- `gaze_calibration_serialize()` / `gaze_calibration_deserialize()` calibration blob 序列化
 - iPhone `GazeProvider` Swift Package
 - 二进制 sample codec 与长度前缀 envelope
 - C++ 单测与 Swift 协议层测试
@@ -42,8 +43,8 @@ Sources/
   GazeProtocolKit/
   GazeProviderKit/
 Tests/
-  GazeProtocolKitTests/
 tests/
+  GazeProtocolKitTests/
   core_tests.cpp
 ```
 

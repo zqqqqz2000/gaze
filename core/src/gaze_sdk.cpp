@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,8 @@ constexpr float kMetersPerMillimeter = 0.001f;
 constexpr float kMinDirectionNorm = 1e-6f;
 constexpr float kFiniteDifferenceEps = 1e-4f;
 constexpr float kPlaneParallelEps = 1e-5f;
+constexpr uint8_t kCalibrationMagic[4] = {'G', 'Z', 'C', 'B'};
+constexpr uint32_t kCalibrationEncodingVersion = 1u;
 
 struct Vec2 {
     float x = 0.0f;
@@ -627,6 +630,33 @@ bool valid_display(const gaze_display_desc_t* display) {
            display->width_px > 0 && display->height_px > 0;
 }
 
+void write_u32_le(uint8_t* buffer, size_t offset, uint32_t value) {
+    buffer[offset + 0] = static_cast<uint8_t>(value & 0xffu);
+    buffer[offset + 1] = static_cast<uint8_t>((value >> 8u) & 0xffu);
+    buffer[offset + 2] = static_cast<uint8_t>((value >> 16u) & 0xffu);
+    buffer[offset + 3] = static_cast<uint8_t>((value >> 24u) & 0xffu);
+}
+
+uint32_t read_u32_le(const uint8_t* buffer, size_t offset) {
+    return static_cast<uint32_t>(buffer[offset + 0]) |
+           (static_cast<uint32_t>(buffer[offset + 1]) << 8u) |
+           (static_cast<uint32_t>(buffer[offset + 2]) << 16u) |
+           (static_cast<uint32_t>(buffer[offset + 3]) << 24u);
+}
+
+void write_f32_le(uint8_t* buffer, size_t offset, float value) {
+    uint32_t bits = 0u;
+    std::memcpy(&bits, &value, sizeof(bits));
+    write_u32_le(buffer, offset, bits);
+}
+
+float read_f32_le(const uint8_t* buffer, size_t offset) {
+    const uint32_t bits = read_u32_le(buffer, offset);
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 }  // namespace
 
 struct gaze_cal_session {
@@ -821,6 +851,119 @@ int gaze_refit_pose(
         std::end(base_calibration->residual_v),
         std::begin(calibration.residual_v)
     );
+    *out_calibration = calibration;
+    return GAZE_OK;
+}
+
+size_t gaze_calibration_blob_size(void) {
+    constexpr size_t kFloatFieldCount = 37u;
+    return 4u + 4u + (kFloatFieldCount * sizeof(float)) + sizeof(uint32_t);
+}
+
+int gaze_calibration_serialize(
+    const gaze_calibration_t* calibration,
+    void* out_buffer,
+    size_t buffer_size
+) {
+    if (calibration == nullptr || out_buffer == nullptr) {
+        return GAZE_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer_size < gaze_calibration_blob_size()) {
+        return GAZE_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    auto* bytes = static_cast<uint8_t*>(out_buffer);
+    std::memcpy(bytes, kCalibrationMagic, sizeof(kCalibrationMagic));
+    write_u32_le(bytes, 4u, kCalibrationEncodingVersion);
+
+    size_t offset = 8u;
+    write_f32_le(bytes, offset, calibration->version);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->screen_width_mm);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->screen_height_mm);
+    offset += 4u;
+    for (float value : calibration->T_provider_from_screen) {
+        write_f32_le(bytes, offset, value);
+        offset += 4u;
+    }
+    write_f32_le(bytes, offset, calibration->yaw_bias_rad);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->pitch_bias_rad);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->yaw_gain);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->pitch_gain);
+    offset += 4u;
+    for (float value : calibration->residual_u) {
+        write_f32_le(bytes, offset, value);
+        offset += 4u;
+    }
+    for (float value : calibration->residual_v) {
+        write_f32_le(bytes, offset, value);
+        offset += 4u;
+    }
+    write_f32_le(bytes, offset, calibration->rmse_px);
+    offset += 4u;
+    write_f32_le(bytes, offset, calibration->median_err_px);
+    offset += 4u;
+    write_u32_le(bytes, offset, calibration->sample_count);
+    return GAZE_OK;
+}
+
+int gaze_calibration_deserialize(
+    const void* buffer,
+    size_t buffer_size,
+    gaze_calibration_t* out_calibration
+) {
+    if (buffer == nullptr || out_calibration == nullptr) {
+        return GAZE_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer_size < gaze_calibration_blob_size()) {
+        return GAZE_ERROR_BAD_ENCODING;
+    }
+
+    const auto* bytes = static_cast<const uint8_t*>(buffer);
+    if (std::memcmp(bytes, kCalibrationMagic, sizeof(kCalibrationMagic)) != 0) {
+        return GAZE_ERROR_BAD_ENCODING;
+    }
+    if (read_u32_le(bytes, 4u) != kCalibrationEncodingVersion) {
+        return GAZE_ERROR_BAD_ENCODING;
+    }
+
+    gaze_calibration_t calibration{};
+    size_t offset = 8u;
+    calibration.version = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.screen_width_mm = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.screen_height_mm = read_f32_le(bytes, offset);
+    offset += 4u;
+    for (float& value : calibration.T_provider_from_screen) {
+        value = read_f32_le(bytes, offset);
+        offset += 4u;
+    }
+    calibration.yaw_bias_rad = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.pitch_bias_rad = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.yaw_gain = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.pitch_gain = read_f32_le(bytes, offset);
+    offset += 4u;
+    for (float& value : calibration.residual_u) {
+        value = read_f32_le(bytes, offset);
+        offset += 4u;
+    }
+    for (float& value : calibration.residual_v) {
+        value = read_f32_le(bytes, offset);
+        offset += 4u;
+    }
+    calibration.rmse_px = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.median_err_px = read_f32_le(bytes, offset);
+    offset += 4u;
+    calibration.sample_count = read_u32_le(bytes, offset);
     *out_calibration = calibration;
     return GAZE_OK;
 }

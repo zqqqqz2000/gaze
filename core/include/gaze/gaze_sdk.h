@@ -19,7 +19,9 @@ enum {
     GAZE_ERROR_INVALID_ARGUMENT = -1,
     GAZE_ERROR_NOT_ENOUGH_DATA = -2,
     GAZE_ERROR_NUMERIC_FAILURE = -3,
-    GAZE_ERROR_OUT_OF_RANGE = -4
+    GAZE_ERROR_OUT_OF_RANGE = -4,
+    GAZE_ERROR_BUFFER_TOO_SMALL = -5,
+    GAZE_ERROR_BAD_ENCODING = -6
 };
 
 typedef struct {
@@ -125,6 +127,18 @@ int gaze_refit_pose(
     const gaze_display_desc_t* display,
     const gaze_refit_observation_t* observations,
     size_t observation_count,
+    gaze_calibration_t* out_calibration
+);
+
+size_t gaze_calibration_blob_size(void);
+int gaze_calibration_serialize(
+    const gaze_calibration_t* calibration,
+    void* out_buffer,
+    size_t buffer_size
+);
+int gaze_calibration_deserialize(
+    const void* buffer,
+    size_t buffer_size,
     gaze_calibration_t* out_calibration
 );
 

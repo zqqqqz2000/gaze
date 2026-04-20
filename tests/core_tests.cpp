@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <array>
 #include <vector>
 
 namespace {
@@ -60,6 +61,14 @@ gaze_provider_sample_t make_sample(float origin_x, float origin_y, float origin_
     sample.confidence = 1.0f;
     sample.face_distance_m = 0.55f;
     return sample;
+}
+
+gaze_refit_observation_t make_refit_observation(float u, float v, const gaze_provider_sample_t& sample) {
+    gaze_refit_observation_t observation{};
+    observation.u = u;
+    observation.v = v;
+    observation.sample = sample;
+    return observation;
 }
 
 void test_runtime_solve_center() {
@@ -135,12 +144,120 @@ void test_calibration_session() {
     gaze_cal_free(session);
 }
 
+void test_refit_pose() {
+    const gaze_display_desc_t display = make_display();
+    const gaze_calibration_t base = make_front_calibration();
+    const std::array<gaze_refit_observation_t, 5> observations{{
+        make_refit_observation(0.5f, 0.5f, make_sample(0.02f, 0.0f, 0.0f, -0.02f, 0.0f, 0.6f)),
+        make_refit_observation(0.2f, 0.2f, make_sample(0.02f, 0.0f, 0.0f, 0.16f, 0.102f, 0.6f)),
+        make_refit_observation(0.8f, 0.2f, make_sample(0.02f, 0.0f, 0.0f, -0.20f, 0.102f, 0.6f)),
+        make_refit_observation(0.2f, 0.8f, make_sample(0.02f, 0.0f, 0.0f, 0.16f, -0.102f, 0.6f)),
+        make_refit_observation(0.8f, 0.8f, make_sample(0.02f, 0.0f, 0.0f, -0.20f, -0.102f, 0.6f)),
+    }};
+
+    gaze_calibration_t refit{};
+    expect_true(
+        gaze_refit_pose(&base, &display, observations.data(), observations.size(), &refit) == GAZE_OK,
+        "refit should succeed"
+    );
+    expect_true(refit.sample_count == observations.size(), "refit sample count should match");
+    expect_true(std::fabs(refit.T_provider_from_screen[12] - 0.02f) < 0.03f, "refit should recover x translation");
+
+    gaze_screen_point_t point{};
+    const gaze_provider_sample_t center_sample = observations[0].sample;
+    expect_true(gaze_solve_point(&center_sample, &refit, &display, &point) == GAZE_OK, "refit solve should work");
+    expect_near(point.u, 0.5f, 0.06f, "refit center u");
+    expect_near(point.v, 0.5f, 0.06f, "refit center v");
+}
+
+void test_calibration_blob_round_trip() {
+    gaze_calibration_t calibration = make_front_calibration();
+    calibration.yaw_bias_rad = 0.01f;
+    calibration.pitch_bias_rad = -0.02f;
+    calibration.residual_u[0] = 0.03f;
+    calibration.residual_v[5] = -0.01f;
+    calibration.rmse_px = 12.0f;
+    calibration.median_err_px = 9.0f;
+    calibration.sample_count = 42u;
+
+    std::vector<unsigned char> blob(gaze_calibration_blob_size());
+    expect_true(
+        gaze_calibration_serialize(&calibration, blob.data(), blob.size()) == GAZE_OK,
+        "calibration serialization should succeed"
+    );
+
+    gaze_calibration_t decoded{};
+    expect_true(
+        gaze_calibration_deserialize(blob.data(), blob.size(), &decoded) == GAZE_OK,
+        "calibration deserialization should succeed"
+    );
+    expect_near(decoded.version, calibration.version, kTolerance, "blob version");
+    expect_near(decoded.screen_width_mm, calibration.screen_width_mm, kTolerance, "blob width");
+    expect_near(decoded.screen_height_mm, calibration.screen_height_mm, kTolerance, "blob height");
+    expect_near(decoded.T_provider_from_screen[12], calibration.T_provider_from_screen[12], kTolerance, "blob tx");
+    expect_near(decoded.T_provider_from_screen[14], calibration.T_provider_from_screen[14], kTolerance, "blob tz");
+    expect_near(decoded.yaw_bias_rad, calibration.yaw_bias_rad, kTolerance, "blob yaw bias");
+    expect_near(decoded.pitch_bias_rad, calibration.pitch_bias_rad, kTolerance, "blob pitch bias");
+    expect_near(decoded.residual_u[0], calibration.residual_u[0], kTolerance, "blob residual u");
+    expect_near(decoded.residual_v[5], calibration.residual_v[5], kTolerance, "blob residual v");
+    expect_true(decoded.sample_count == calibration.sample_count, "blob sample count");
+}
+
+void test_runtime_residual_application() {
+    const gaze_display_desc_t display = make_display();
+    gaze_calibration_t calibration = make_front_calibration();
+    calibration.residual_u[0] = 0.1f;
+    calibration.residual_v[0] = -0.05f;
+    const gaze_provider_sample_t sample = make_sample(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    gaze_screen_point_t point{};
+    expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "residual solve should succeed");
+    expect_near(point.u, 0.6f, kTolerance, "residual should shift u");
+    expect_near(point.v, 0.45f, kTolerance, "residual should shift v");
+}
+
+void test_invalid_arguments() {
+    const gaze_display_desc_t display = make_display();
+    const gaze_calibration_t calibration = make_front_calibration();
+    const gaze_provider_sample_t sample = make_sample(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+    gaze_screen_point_t point{};
+
+    expect_true(gaze_cal_begin(nullptr, GAZE_CAL_MODE_FULL) == nullptr, "null display should fail session creation");
+    expect_true(gaze_solve_point(nullptr, &calibration, &display, &point) == GAZE_ERROR_INVALID_ARGUMENT, "null sample");
+    expect_true(gaze_solve_point(&sample, nullptr, &display, &point) == GAZE_ERROR_INVALID_ARGUMENT, "null calibration");
+    expect_true(gaze_solve_point(&sample, &calibration, nullptr, &point) == GAZE_ERROR_INVALID_ARGUMENT, "null display");
+    expect_true(
+        gaze_calibration_serialize(&calibration, nullptr, gaze_calibration_blob_size()) == GAZE_ERROR_INVALID_ARGUMENT,
+        "null blob buffer"
+    );
+    std::vector<unsigned char> blob(gaze_calibration_blob_size() - 1u, 0u);
+    expect_true(
+        gaze_calibration_serialize(&calibration, blob.data(), blob.size()) == GAZE_ERROR_BUFFER_TOO_SMALL,
+        "short blob should fail encode"
+    );
+
+    std::vector<unsigned char> tiny_blob(4u, 0u);
+    gaze_calibration_t decoded{};
+    expect_true(
+        gaze_calibration_deserialize(tiny_blob.data(), tiny_blob.size(), &decoded) == GAZE_ERROR_BAD_ENCODING,
+        "tiny blob should fail decode"
+    );
+    expect_true(
+        gaze_refit_pose(&calibration, &display, nullptr, 0u, &decoded) == GAZE_ERROR_INVALID_ARGUMENT,
+        "null refit observations"
+    );
+}
+
 }  // namespace
 
 int main() {
     test_runtime_solve_center();
     test_runtime_solve_offset();
     test_calibration_session();
+    test_refit_pose();
+    test_calibration_blob_round_trip();
+    test_runtime_residual_application();
+    test_invalid_arguments();
     std::cout << "core tests passed\n";
     return 0;
 }

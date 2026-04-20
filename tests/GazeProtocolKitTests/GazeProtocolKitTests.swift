@@ -21,6 +21,7 @@ final class GazeProtocolKitTests: XCTestCase {
         )
 
         let encoded = BinarySampleCodec.encode(sample)
+        XCTAssertEqual(encoded.count, 8 + 4 + (BinarySampleCodec.floatCount * 4))
         let decoded = try BinarySampleCodec.decode(encoded)
         XCTAssertEqual(decoded, sample)
     }
@@ -30,5 +31,15 @@ final class GazeProtocolKitTests: XCTestCase {
         let envelope = WireEnvelope(channel: .data, kind: 1, payload: payload)
         let decoded = try WireEnvelope.decode(envelope.encode())
         XCTAssertEqual(decoded, envelope)
+    }
+
+    func testProviderSampleDecodeRejectsWrongLength() {
+        XCTAssertThrowsError(try BinarySampleCodec.decode(Data(repeating: 0, count: 8)))
+    }
+
+    func testEnvelopeDecodeRejectsBadMagic() {
+        var frame = WireEnvelope(channel: .data, kind: 1, payload: Data([1, 2, 3])).encode()
+        frame[0] = 0x58
+        XCTAssertThrowsError(try WireEnvelope.decode(frame))
     }
 }

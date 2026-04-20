@@ -22,7 +22,8 @@ let package = Package(
         ),
         .testTarget(
             name: "GazeProtocolKitTests",
-            dependencies: ["GazeProtocolKit"]
+            dependencies: ["GazeProtocolKit"],
+            path: "tests/GazeProtocolKitTests"
         ),
     ]
 )

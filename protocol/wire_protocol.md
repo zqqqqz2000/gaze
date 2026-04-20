@@ -49,3 +49,12 @@ control payload 使用 UTF-8 JSON。
 ### kind = 3: CalibrationAck
 
 JSON payload。
+
+## Calibration Blob
+
+`gaze_calibration_t` 的持久化由 core SDK 负责，不走上面的 message envelope。
+
+- magic: `GZCB`
+- version: `1`
+- encoding: little-endian
+- payload: `gaze_calibration_t` 的显式字段序列化，不依赖编译器 struct layout
