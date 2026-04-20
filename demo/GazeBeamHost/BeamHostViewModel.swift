@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import GazeProtocolKit
 import QuartzCore
+import simd
 
 @MainActor
 final class BeamHostViewModel: ObservableObject {
@@ -43,7 +44,7 @@ final class BeamHostViewModel: ObservableObject {
     private let shouldAutoPreview = ProcessInfo.processInfo.environment["GAZE_BEAM_PREVIEW"] == "1"
     private var didStart = false
     private var previewTimer: Timer?
-    private var calibrationModel: QuadraticCalibrationModel?
+    private var calibrationModel: ScreenPlaneCalibrationModel?
     private var calibrationCollector: CalibrationCollector?
     private var calibrationTask: Task<Void, Never>?
     private let calibrationPersistence = CalibrationPersistence()
@@ -95,6 +96,7 @@ final class BeamHostViewModel: ObservableObject {
             appendLog("client connected: \(endpoint)")
         case .clientDisconnected(let endpoint):
             connectionStatus = "waiting for iPhone"
+            overlayModel.clearTarget()
             appendLog("client disconnected: \(endpoint)")
         case .receivedSample(let sample):
             consume(sample: sample)
@@ -104,17 +106,15 @@ final class BeamHostViewModel: ObservableObject {
     private func consume(sample: ProviderSamplePayload) {
         sampleCount += 1
         confidenceText = String(format: "%.2f", sample.confidence)
-        let rawPoint = CalibrationRawPoint(
-            sampleX: Double(sample.lookAtPointFM[0]),
-            sampleY: Double(sample.lookAtPointFM[1])
-        )
-        collectCalibrationSampleIfNeeded(rawPoint: rawPoint, confidence: sample.confidence)
+        collectCalibrationSampleIfNeeded(sample: sample)
 
-        let point = mapToScreen(rawPoint: rawPoint, sample: sample)
+        let point = mapToScreen(sample: sample)
         pointText = String(format: "%.0f, %.0f", point.x, point.y)
 
-        if !previewEnabled && sample.confidence >= 0.35 {
+        if !previewEnabled && sample.confidence >= 0.35 && sample.trackingFlags == 1 {
             overlayModel.setTarget(point)
+        } else if !previewEnabled {
+            overlayModel.clearTarget()
         }
 
         if sampleCount == 1 {
@@ -166,7 +166,7 @@ final class BeamHostViewModel: ObservableObject {
             calibrationTask = nil
         }
 
-        var fittedSamples: [QuadraticCalibrationSample] = []
+        var fittedSamples: [ScreenPlaneCalibrationSample] = []
 
         for (index, normalizedTarget) in CalibrationGrid.targets.enumerated() {
             if Task.isCancelled {
@@ -195,7 +195,7 @@ final class BeamHostViewModel: ObservableObject {
                 return
             }
 
-            guard let averagedPoint = collector.averageRawPoint(minimumCount: 10) else {
+            guard let averagedRay = collector.averageRaySample(minimumCount: 10) else {
                 calibrationStatus = "insufficient data at point \(index + 1)"
                 calibrationDetail = "need at least 10 confident samples"
                 appendLog("calibration failed at point \(index + 1): insufficient stable samples")
@@ -203,9 +203,9 @@ final class BeamHostViewModel: ObservableObject {
             }
 
             fittedSamples.append(
-                QuadraticCalibrationSample(
-                    rawX: averagedPoint.x,
-                    rawY: averagedPoint.y,
+                ScreenPlaneCalibrationSample(
+                    origin: averagedRay.origin,
+                    direction: averagedRay.direction,
                     targetX: Double(normalizedTarget.x),
                     targetY: Double(normalizedTarget.y)
                 )
@@ -213,9 +213,9 @@ final class BeamHostViewModel: ObservableObject {
             appendLog("captured calibration point \(index + 1)/\(CalibrationGrid.targets.count)")
         }
 
-        guard let calibrationModel = QuadraticCalibrationModel(samples: fittedSamples) else {
+        guard let calibrationModel = ScreenPlaneCalibrationModel(samples: fittedSamples) else {
             calibrationStatus = "calibration fit failed"
-            calibrationDetail = "quadratic fit became singular"
+            calibrationDetail = "screen plane solve became singular"
             appendLog("calibration fit failed")
             return
         }
@@ -260,11 +260,14 @@ final class BeamHostViewModel: ObservableObject {
         RunLoop.main.add(previewTimer!, forMode: .common)
     }
 
-    private func collectCalibrationSampleIfNeeded(rawPoint: CalibrationRawPoint, confidence: Float) {
+    private func collectCalibrationSampleIfNeeded(sample: ProviderSamplePayload) {
         guard var collector = calibrationCollector else {
             return
         }
-        guard confidence >= 0.45 else {
+        guard sample.confidence >= 0.45 else {
+            return
+        }
+        guard let raySample = CalibrationRaySample(providerSample: sample) else {
             return
         }
 
@@ -273,15 +276,18 @@ final class BeamHostViewModel: ObservableObject {
             return
         }
 
-        collector.rawSamples.append(rawPoint)
+        collector.raySamples.append(raySample)
         calibrationCollector = collector
         calibrationStatus = "fixate \(collector.stepIndex + 1)/\(CalibrationGrid.targets.count)"
-        calibrationDetail = "\(collector.rawSamples.count) stable samples"
+        calibrationDetail = "\(collector.raySamples.count) stable samples"
     }
 
-    private func mapToScreen(rawPoint: CalibrationRawPoint, sample: ProviderSamplePayload) -> CGPoint {
-        if let calibrationModel {
-            let normalized = calibrationModel.map(rawX: rawPoint.x, rawY: rawPoint.y)
+    private func mapToScreen(sample: ProviderSamplePayload) -> CGPoint {
+        if
+            let calibrationModel,
+            let raySample = CalibrationRaySample(providerSample: sample),
+            let normalized = calibrationModel.map(origin: raySample.origin, direction: raySample.direction)
+        {
             return screenPoint(
                 fromNormalized: CGPoint(
                     x: clamp(CGFloat(normalized.x), min: 0.03, max: 0.97),

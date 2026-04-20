@@ -1,13 +1,33 @@
 import CoreGraphics
 import Foundation
+import GazeProtocolKit
+import simd
 
-struct CalibrationRawPoint {
-    var x: Double
-    var y: Double
+struct CalibrationRaySample {
+    var origin: SIMD3<Double>
+    var direction: SIMD3<Double>
 
-    init(sampleX: Double, sampleY: Double) {
-        self.x = sampleX
-        self.y = sampleY
+    init(origin: SIMD3<Double>, direction: SIMD3<Double>) {
+        self.origin = origin
+        self.direction = simd_normalize(direction)
+    }
+
+    init?(providerSample: ProviderSamplePayload) {
+        guard providerSample.gazeOriginPM.count == 3, providerSample.gazeDirP.count == 3 else {
+            return nil
+        }
+        self.init(
+            origin: SIMD3(
+                Double(providerSample.gazeOriginPM[0]),
+                Double(providerSample.gazeOriginPM[1]),
+                Double(providerSample.gazeOriginPM[2])
+            ),
+            direction: SIMD3(
+                Double(providerSample.gazeDirP[0]),
+                Double(providerSample.gazeDirP[1]),
+                Double(providerSample.gazeDirP[2])
+            )
+        )
     }
 }
 
@@ -16,18 +36,31 @@ struct CalibrationCollector {
     var targetNormalized: CGPoint
     var collectionStart: CFTimeInterval
     var collectionEnd: CFTimeInterval
-    var rawSamples: [CalibrationRawPoint] = []
+    var raySamples: [CalibrationRaySample] = []
 
-    func averageRawPoint(minimumCount: Int) -> CalibrationRawPoint? {
-        guard rawSamples.count >= minimumCount else {
+    func averageRaySample(minimumCount: Int) -> CalibrationRaySample? {
+        guard raySamples.count >= minimumCount else {
             return nil
         }
 
-        let xs = trimmed(rawSamples.map(\.x))
-        let ys = trimmed(rawSamples.map(\.y))
-        return CalibrationRawPoint(
-            sampleX: xs.reduce(0, +) / Double(xs.count),
-            sampleY: ys.reduce(0, +) / Double(ys.count)
+        let originX = trimmed(raySamples.map(\.origin.x))
+        let originY = trimmed(raySamples.map(\.origin.y))
+        let originZ = trimmed(raySamples.map(\.origin.z))
+        let directionX = trimmed(raySamples.map(\.direction.x))
+        let directionY = trimmed(raySamples.map(\.direction.y))
+        let directionZ = trimmed(raySamples.map(\.direction.z))
+
+        return CalibrationRaySample(
+            origin: SIMD3(
+                originX.reduce(0, +) / Double(originX.count),
+                originY.reduce(0, +) / Double(originY.count),
+                originZ.reduce(0, +) / Double(originZ.count)
+            ),
+            direction: SIMD3(
+                directionX.reduce(0, +) / Double(directionX.count),
+                directionY.reduce(0, +) / Double(directionY.count),
+                directionZ.reduce(0, +) / Double(directionZ.count)
+            )
         )
     }
 

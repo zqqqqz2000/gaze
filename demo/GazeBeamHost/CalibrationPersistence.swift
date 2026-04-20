@@ -13,15 +13,15 @@ struct CalibrationPersistence {
             .appendingPathComponent("quadratic-calibration.json", isDirectory: false)
     }
 
-    func load() throws -> QuadraticCalibrationModel? {
+    func load() throws -> ScreenPlaneCalibrationModel? {
         guard fileManager.fileExists(atPath: calibrationURL.path) else {
             return nil
         }
         let data = try Data(contentsOf: calibrationURL)
-        return try QuadraticCalibrationModel(serializedData: data)
+        return try ScreenPlaneCalibrationModel(serializedData: data)
     }
 
-    func save(_ model: QuadraticCalibrationModel) throws {
+    func save(_ model: ScreenPlaneCalibrationModel) throws {
         let directoryURL = calibrationURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         let data = try model.serializedData()

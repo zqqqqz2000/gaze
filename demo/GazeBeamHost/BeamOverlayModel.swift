@@ -45,6 +45,12 @@ final class BeamOverlayModel: ObservableObject {
         objectWillChange.send()
     }
 
+    func clearTarget() {
+        settledPoint = nil
+        transition = nil
+        objectWillChange.send()
+    }
+
     func snapshot(at time: CFTimeInterval = CACurrentMediaTime()) -> BeamSnapshot {
         guard let currentPoint = resolvedPoint(at: time) else {
             return BeamSnapshot(anchorPoint: nil, currentPoint: nil, startRadius: baseRadius, endRadius: baseRadius)
