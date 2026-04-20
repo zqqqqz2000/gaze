@@ -15,12 +15,17 @@ final class GazeDemoViewModel: ObservableObject {
     @Published var isStreaming = false
     @Published var logLines: [String] = []
     let shouldAutoStart: Bool
+    let shouldAutoStream: Bool
 
     private let provider = GazeProvider()
     private var streamClient: ProviderStreamClient?
 
     init() {
-        shouldAutoStart = ProcessInfo.processInfo.environment["GAZE_DEMO_AUTO_START"] == "1"
+        let environment = ProcessInfo.processInfo.environment
+        shouldAutoStart = environment["GAZE_DEMO_AUTO_START"] == "1"
+        shouldAutoStream = environment["GAZE_DEMO_AUTO_STREAM"] == "1"
+        host = environment["GAZE_DEMO_HOST"] ?? ""
+        port = environment["GAZE_DEMO_PORT"] ?? "9000"
 
         provider.onStateChanged = { [weak self] state in
             Task { @MainActor [weak self] in
@@ -81,6 +86,19 @@ final class GazeDemoViewModel: ObservableObject {
         streamClient = client
         provider.streamClient = client
         appendLog("streaming enabled to \(host):\(portValue)")
+    }
+
+    func startAutomaticSessionIfNeeded() {
+        guard stateText == "idle" else {
+            return
+        }
+        if shouldAutoStart {
+            startTracking()
+        }
+        if shouldAutoStream && !isStreaming {
+            isStreaming = true
+            setStreaming(enabled: true)
+        }
     }
 
     private func update(sample: ProviderSamplePayload) {

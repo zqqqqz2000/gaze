@@ -61,10 +61,7 @@ struct ContentView: View {
         }
         .navigationViewStyle(.stack)
         .onAppear {
-            guard viewModel.shouldAutoStart, viewModel.stateText == "idle" else {
-                return
-            }
-            viewModel.startTracking()
+            viewModel.startAutomaticSessionIfNeeded()
         }
     }
 

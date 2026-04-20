@@ -1,6 +1,9 @@
-# Gaze Demo App
+# Gaze Demo Apps
 
-`demo/` 里提供一个最小 iPhone demo app，用来真机调试 `GazeProviderKit`。
+`demo/` 里现在有两端：
+
+- `GazeDemoApp`：iPhone 真机 provider，负责采集 `ARKit` gaze sample 并推流
+- `GazeBeamHost`：macOS host，负责接收 sample、做 9 点校准，并在屏幕最上层渲染 gaze overlay
 
 ## 打开方式
 
@@ -37,13 +40,36 @@ demo/GazeDemoApp.xcodeproj
 
 ## Demo 功能
 
+### iPhone Demo
+
 - 启动 / 停止 `GazeProvider`
 - 展示 provider state
 - 展示最新 sample 的 confidence、face distance、gaze origin、gaze dir
 - 可选连接 host IP + port，发送 sample stream
+
+### macOS Host
+
+- 监听 `9000` 端口接收 iPhone sample
+- 在屏幕最上层渲染半透明 beam overlay
+- overlay 不抢焦点，鼠标事件直接穿透
+- 9 点校准
+- 自动保存上一次成功的校准参数，并在下次启动时恢复
+
+## 端到端校准步骤
+
+1. 先启动 `GazeBeamHost`
+2. 记下 host 窗口里显示的本机 IP，例如 `192.168.x.x:9000`
+3. 在 iPhone `GazeDemoApp` 里填入同样的 host 和 port
+4. iPhone 开始 tracking，并开启 stream
+5. 在 Mac 端点击 `Start Calibration`
+6. 依次盯住屏幕上出现的 9 个校准点，等待每个点自动采样完成
+7. 状态显示 `calibration complete` 后，host 会自动保存本次校准
+
+如果要重新做校准，点击 `Clear Calibration` 后再重新开始。
 
 ## 常见问题
 
 - 如果 `Start Tracking` 报错 `ARFaceTracking not supported`，说明设备不支持
 - 如果 app 能启动但没有 sample，多半是没授权相机，或前摄没有看到人脸
 - 如果网络流发不出去，先确认 iPhone 和 Mac 在同一网段
+- 如果 host 没有响应校准，先看 `Log` 区域里是否已经收到 `first streamed sample received`
