@@ -1,6 +1,7 @@
 #if canImport(ARKit) && canImport(UIKit)
 import ARKit
 import Foundation
+import GazeProtocolKit
 import simd
 
 public enum ProviderState: Sendable, Equatable {
