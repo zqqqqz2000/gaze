@@ -1,0 +1,353 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		054E99504A4FA37180875F3B /* GazeProviderKit in Frameworks */ = {isa = PBXBuildFile; productRef = F83ABAC19EF4B0DB0043B1D4 /* GazeProviderKit */; };
+		6F7DE9A972F8F65E46F25680 /* GazeDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0B1D7EAD66A8AFC17C408A /* GazeDemoApp.swift */; };
+		8E5108E5937213C6ADD67E05 /* GazeDemoViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FC82E520DEBD88D02F9357 /* GazeDemoViewModel.swift */; };
+		A255FA42D53B049D1A01BA73 /* GazeProtocolKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7B96D4B432D711DACA267A8F /* GazeProtocolKit */; };
+		A3EB7FE9A9E8BE964A2E3D96 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C14B1B3677CB47D67802D5A /* ContentView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		43FC82E520DEBD88D02F9357 /* GazeDemoViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GazeDemoViewModel.swift; sourceTree = "<group>"; };
+		7C14B1B3677CB47D67802D5A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		7D0B1D7EAD66A8AFC17C408A /* GazeDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GazeDemoApp.swift; sourceTree = "<group>"; };
+		E5E1471B64801B7CBAD3997F /* gaze */ = {isa = PBXFileReference; lastKnownFileType = folder; name = gaze; path = ..; sourceTree = SOURCE_ROOT; };
+		E952E669DC20991B29BC7C97 /* GazeDemoApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GazeDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9B96C3703AAF5F644A1DA5E9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				054E99504A4FA37180875F3B /* GazeProviderKit in Frameworks */,
+				A255FA42D53B049D1A01BA73 /* GazeProtocolKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1FD74D86992F8F3B6D6E4608 /* GazeDemoApp */ = {
+			isa = PBXGroup;
+			children = (
+				7C14B1B3677CB47D67802D5A /* ContentView.swift */,
+				7D0B1D7EAD66A8AFC17C408A /* GazeDemoApp.swift */,
+				43FC82E520DEBD88D02F9357 /* GazeDemoViewModel.swift */,
+			);
+			path = GazeDemoApp;
+			sourceTree = "<group>";
+		};
+		5D2DD66202BE70B20E4D5F3A = {
+			isa = PBXGroup;
+			children = (
+				1FD74D86992F8F3B6D6E4608 /* GazeDemoApp */,
+				CDD7BFC7413E1CAC4692C283 /* Packages */,
+				62C16AB56EAE6BD18C6220CB /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		62C16AB56EAE6BD18C6220CB /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E952E669DC20991B29BC7C97 /* GazeDemoApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CDD7BFC7413E1CAC4692C283 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				E5E1471B64801B7CBAD3997F /* gaze */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		602E86E54F8EAA27B1E84458 /* GazeDemoApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BBCBB165954AFC4F71DFA444 /* Build configuration list for PBXNativeTarget "GazeDemoApp" */;
+			buildPhases = (
+				8D103CE1F6DB19C45EB85048 /* Sources */,
+				9B96C3703AAF5F644A1DA5E9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GazeDemoApp;
+			packageProductDependencies = (
+				F83ABAC19EF4B0DB0043B1D4 /* GazeProviderKit */,
+				7B96D4B432D711DACA267A8F /* GazeProtocolKit */,
+			);
+			productName = GazeDemoApp;
+			productReference = E952E669DC20991B29BC7C97 /* GazeDemoApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C74224A995330E9FFA19F1B2 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					602E86E54F8EAA27B1E84458 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 273A92C38885BA733CA66EE9 /* Build configuration list for PBXProject "GazeDemoApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 5D2DD66202BE70B20E4D5F3A;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A6C6D48E0C307FC799D7D19B /* XCLocalSwiftPackageReference ".." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 62C16AB56EAE6BD18C6220CB /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				602E86E54F8EAA27B1E84458 /* GazeDemoApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8D103CE1F6DB19C45EB85048 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A3EB7FE9A9E8BE964A2E3D96 /* ContentView.swift in Sources */,
+				6F7DE9A972F8F65E46F25680 /* GazeDemoApp.swift in Sources */,
+				8E5108E5937213C6ADD67E05 /* GazeDemoViewModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		7BF9F7722096FBF60DCE2093 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GazeDemoApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.GazeDemoApp;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		989D54322EE80CB806959482 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GazeDemoApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.GazeDemoApp;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		BD8F8A8CEF39DD2667B23D86 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CD433219B3C041AE270BCEE7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		273A92C38885BA733CA66EE9 /* Build configuration list for PBXProject "GazeDemoApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BD8F8A8CEF39DD2667B23D86 /* Debug */,
+				CD433219B3C041AE270BCEE7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BBCBB165954AFC4F71DFA444 /* Build configuration list for PBXNativeTarget "GazeDemoApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7BF9F7722096FBF60DCE2093 /* Debug */,
+				989D54322EE80CB806959482 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A6C6D48E0C307FC799D7D19B /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		7B96D4B432D711DACA267A8F /* GazeProtocolKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GazeProtocolKit;
+		};
+		F83ABAC19EF4B0DB0043B1D4 /* GazeProviderKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GazeProviderKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C74224A995330E9FFA19F1B2 /* Project object */;
+}

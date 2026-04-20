@@ -1,0 +1,39 @@
+name: GazeDemoApp
+options:
+  deploymentTarget:
+    iOS: "15.0"
+packages:
+  GazeSDK:
+    path: ..
+targets:
+  GazeDemoApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: GazeDemoApp
+        excludes:
+          - Info.plist
+    info:
+      path: GazeDemoApp/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.GazeDemoApp
+        TARGETED_DEVICE_FAMILY: "1"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTS_MACCATALYST: NO
+        INFOPLIST_FILE: GazeDemoApp/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - package: GazeSDK
+        product: GazeProviderKit
+      - package: GazeSDK
+        product: GazeProtocolKit
+schemes:
+  GazeDemoApp:
+    build:
+      targets:
+        GazeDemoApp: all

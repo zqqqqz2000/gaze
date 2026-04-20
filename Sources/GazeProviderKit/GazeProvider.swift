@@ -14,6 +14,7 @@ public enum ProviderState: Sendable, Equatable {
 public final class GazeProvider: NSObject, ARSessionDelegate {
     public var onSample: (@Sendable (ProviderSamplePayload) -> Void)?
     public var onStateChanged: (@Sendable (ProviderState) -> Void)?
+    public var onDiagnostic: (@Sendable (String) -> Void)?
     public var streamClient: ProviderStreamClient?
 
     private let session = ARSession()
@@ -33,11 +34,13 @@ public final class GazeProvider: NSObject, ARSessionDelegate {
     public func start() throws {
         guard ARFaceTrackingConfiguration.isSupported else {
             state = .unsupported
+            onDiagnostic?("ARFaceTrackingConfiguration.isSupported == false")
             throw NSError(domain: "GazeProvider", code: 1, userInfo: [NSLocalizedDescriptionKey: "ARFaceTracking not supported"])
         }
         let configuration = ARFaceTrackingConfiguration()
         configuration.isLightEstimationEnabled = false
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        onDiagnostic?("session.run invoked")
         state = .running
     }
 
@@ -47,11 +50,22 @@ public final class GazeProvider: NSObject, ARSessionDelegate {
     }
 
     public func sessionWasInterrupted(_ session: ARSession) {
+        onDiagnostic?("session interrupted")
         state = .interrupted
     }
 
     public func sessionInterruptionEnded(_ session: ARSession) {
+        onDiagnostic?("session interruption ended")
         state = .idle
+    }
+
+    public func session(_ session: ARSession, didFailWithError error: Error) {
+        onDiagnostic?("session failed: \(error.localizedDescription)")
+        state = .idle
+    }
+
+    public func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        onDiagnostic?("camera tracking state: \(String(describing: camera.trackingState))")
     }
 
     public func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
