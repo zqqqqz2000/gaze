@@ -9,12 +9,13 @@
 /* Begin PBXBuildFile section */
 		054E99504A4FA37180875F3B /* GazeProviderKit in Frameworks */ = {isa = PBXBuildFile; productRef = F83ABAC19EF4B0DB0043B1D4 /* GazeProviderKit */; };
 		0D89993321545844568649A7 /* BeamHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DCA09D73083CEF25644DC44 /* BeamHostApp.swift */; };
-		1590E38CE4BC152FA5CE2E6C /* GazeProtocolKit in Frameworks */ = {isa = PBXBuildFile; productRef = 169AFD86D7FC4FA9A47DEE88 /* GazeProtocolKit */; };
+		1590E38CE4BC152FA5CE2E6C /* GazeCoreKit in Frameworks */ = {isa = PBXBuildFile; productRef = 82C1642D06A5405D194197DE /* GazeCoreKit */; };
 		413066BB843550FFE1E20B81 /* CalibrationSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F8B097D8ED84DABA386D25D /* CalibrationSupport.swift */; };
 		5CF7CD0A759D1CB896B7CF1C /* BeamOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C398E103EEE4F0CA91B20F6 /* BeamOverlayView.swift */; };
 		5DDAFA3F97E762FD27BB3295 /* BeamHostViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A21A9B4FD0896E7190D225 /* BeamHostViewModel.swift */; };
 		6F7DE9A972F8F65E46F25680 /* GazeDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0B1D7EAD66A8AFC17C408A /* GazeDemoApp.swift */; };
 		73CF2FEDA87DB3C2037E31D7 /* BeamHostControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D1F98983AAB8DE07D23EC0D /* BeamHostControlView.swift */; };
+		868B7433CC7A35C4656CCA89 /* GazeProtocolKit in Frameworks */ = {isa = PBXBuildFile; productRef = 169AFD86D7FC4FA9A47DEE88 /* GazeProtocolKit */; };
 		8E5108E5937213C6ADD67E05 /* GazeDemoViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FC82E520DEBD88D02F9357 /* GazeDemoViewModel.swift */; };
 		950106A032CDC2C92C7E8ABF /* CalibrationPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F633B42B1CE2CF4916DAB61 /* CalibrationPersistence.swift */; };
 		95395F14713CB3DA5925D3A9 /* ProviderSampleServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88ADD85C2E4EC045E3C7B1E4 /* ProviderSampleServer.swift */; };
@@ -41,7 +42,7 @@
 		9C398E103EEE4F0CA91B20F6 /* BeamOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeamOverlayView.swift; sourceTree = "<group>"; };
 		D1248F03774C0F7EED5249BD /* BeamOverlayModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeamOverlayModel.swift; sourceTree = "<group>"; };
 		E5E1471B64801B7CBAD3997F /* gaze */ = {isa = PBXFileReference; lastKnownFileType = folder; name = gaze; path = ..; sourceTree = SOURCE_ROOT; };
-		E952E669DC20991B29BC7C97 /* GazeDemoApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GazeDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E952E669DC20991B29BC7C97 /* GazeDemoApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GazeDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -58,7 +59,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1590E38CE4BC152FA5CE2E6C /* GazeProtocolKit in Frameworks */,
+				1590E38CE4BC152FA5CE2E6C /* GazeCoreKit in Frameworks */,
+				868B7433CC7A35C4656CCA89 /* GazeProtocolKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -135,6 +137,7 @@
 			);
 			name = GazeBeamHost;
 			packageProductDependencies = (
+				82C1642D06A5405D194197DE /* GazeCoreKit */,
 				169AFD86D7FC4FA9A47DEE88 /* GazeProtocolKit */,
 			);
 			productName = GazeBeamHost;
@@ -174,7 +177,6 @@
 						ProvisioningStyle = Automatic;
 					};
 					602E86E54F8EAA27B1E84458 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -260,7 +262,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GazeDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -283,7 +285,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GazeDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -485,6 +487,10 @@
 		7B96D4B432D711DACA267A8F /* GazeProtocolKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = GazeProtocolKit;
+		};
+		82C1642D06A5405D194197DE /* GazeCoreKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GazeCoreKit;
 		};
 		F83ABAC19EF4B0DB0043B1D4 /* GazeProviderKit */ = {
 			isa = XCSwiftPackageProductDependency;

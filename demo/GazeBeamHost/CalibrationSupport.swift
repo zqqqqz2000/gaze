@@ -1,77 +1,63 @@
 import CoreGraphics
 import Foundation
 import GazeProtocolKit
-import simd
-
-struct CalibrationRaySample {
-    var origin: SIMD3<Double>
-    var direction: SIMD3<Double>
-
-    init(origin: SIMD3<Double>, direction: SIMD3<Double>) {
-        self.origin = origin
-        self.direction = simd_normalize(direction)
-    }
-
-    init?(providerSample: ProviderSamplePayload) {
-        guard providerSample.gazeOriginPM.count == 3, providerSample.gazeDirP.count == 3 else {
-            return nil
-        }
-        self.init(
-            origin: SIMD3(
-                Double(providerSample.gazeOriginPM[0]),
-                Double(providerSample.gazeOriginPM[1]),
-                Double(providerSample.gazeOriginPM[2])
-            ),
-            direction: SIMD3(
-                Double(providerSample.gazeDirP[0]),
-                Double(providerSample.gazeDirP[1]),
-                Double(providerSample.gazeDirP[2])
-            )
-        )
-    }
-}
 
 struct CalibrationCollector {
     var stepIndex: Int
     var targetNormalized: CGPoint
     var collectionStart: CFTimeInterval
     var collectionEnd: CFTimeInterval
-    var raySamples: [CalibrationRaySample] = []
+    var samples: [ProviderSamplePayload] = []
 
-    func averageRaySample(minimumCount: Int) -> CalibrationRaySample? {
-        guard raySamples.count >= minimumCount else {
+    func stableSamples(minimumCount: Int) -> [ProviderSamplePayload]? {
+        guard samples.count >= minimumCount else {
             return nil
         }
-
-        let originX = trimmed(raySamples.map(\.origin.x))
-        let originY = trimmed(raySamples.map(\.origin.y))
-        let originZ = trimmed(raySamples.map(\.origin.z))
-        let directionX = trimmed(raySamples.map(\.direction.x))
-        let directionY = trimmed(raySamples.map(\.direction.y))
-        let directionZ = trimmed(raySamples.map(\.direction.z))
-
-        return CalibrationRaySample(
-            origin: SIMD3(
-                originX.reduce(0, +) / Double(originX.count),
-                originY.reduce(0, +) / Double(originY.count),
-                originZ.reduce(0, +) / Double(originZ.count)
-            ),
-            direction: SIMD3(
-                directionX.reduce(0, +) / Double(directionX.count),
-                directionY.reduce(0, +) / Double(directionY.count),
-                directionZ.reduce(0, +) / Double(directionZ.count)
-            )
-        )
-    }
-
-    private func trimmed(_ values: [Double]) -> [Double] {
-        guard values.count >= 5 else {
-            return values
+        guard samples.count >= 7 else {
+            return samples
         }
 
-        let sorted = values.sorted()
-        let trimCount = min(max(sorted.count / 6, 1), (sorted.count - 1) / 2)
-        return Array(sorted.dropFirst(trimCount).dropLast(trimCount))
+        let keepMask = intersectingKeepMask(for: [
+            samples.map { Double($0.gazeOriginPM[safe: 0] ?? 0) },
+            samples.map { Double($0.gazeOriginPM[safe: 1] ?? 0) },
+            samples.map { Double($0.gazeOriginPM[safe: 2] ?? 0) },
+            samples.map { Double($0.gazeDirP[safe: 0] ?? 0) },
+            samples.map { Double($0.gazeDirP[safe: 1] ?? 0) },
+            samples.map { Double($0.gazeDirP[safe: 2] ?? 0) },
+        ])
+        let filtered = zip(samples, keepMask).compactMap { sample, keep in
+            keep ? sample : nil
+        }
+        return filtered.count >= minimumCount ? filtered : samples
+    }
+
+    private func intersectingKeepMask(for components: [[Double]]) -> [Bool] {
+        guard let sampleCount = components.first?.count else {
+            return []
+        }
+        var keepMask = Array(repeating: true, count: sampleCount)
+        for values in components {
+            let componentMask = keepMaskForTrimmedValues(values)
+            for index in keepMask.indices {
+                keepMask[index] = keepMask[index] && componentMask[index]
+            }
+        }
+        return keepMask
+    }
+
+    private func keepMaskForTrimmedValues(_ values: [Double]) -> [Bool] {
+        guard values.count >= 7 else {
+            return Array(repeating: true, count: values.count)
+        }
+
+        let trimCount = min(max(values.count / 6, 1), (values.count - 1) / 2)
+        let ranked = values.enumerated().sorted { $0.element < $1.element }
+        let kept = ranked.dropFirst(trimCount).dropLast(trimCount).map(\.offset)
+        var mask = Array(repeating: false, count: values.count)
+        for index in kept {
+            mask[index] = true
+        }
+        return mask
     }
 }
 
@@ -81,4 +67,10 @@ enum CalibrationGrid {
         CGPoint(x: 0.15, y: 0.50), CGPoint(x: 0.50, y: 0.50), CGPoint(x: 0.85, y: 0.50),
         CGPoint(x: 0.15, y: 0.82), CGPoint(x: 0.50, y: 0.82), CGPoint(x: 0.85, y: 0.82),
     ]
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }

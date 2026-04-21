@@ -53,6 +53,8 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
     dependencies:
       - package: GazeSDK
+        product: GazeCoreKit
+      - package: GazeSDK
         product: GazeProtocolKit
 schemes:
   GazeDemoApp:

@@ -10,11 +10,22 @@ let package = Package(
     products: [
         .library(name: "GazeProtocolKit", targets: ["GazeProtocolKit"]),
         .library(name: "GazeProviderKit", targets: ["GazeProviderKit"]),
+        .library(name: "GazeCoreKit", targets: ["GazeCoreKit"]),
     ],
     targets: [
         .target(
+            name: "GazeCoreC",
+            dependencies: [],
+            path: "core",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "GazeProtocolKit",
             dependencies: []
+        ),
+        .target(
+            name: "GazeCoreKit",
+            dependencies: ["GazeCoreC", "GazeProtocolKit"]
         ),
         .target(
             name: "GazeProviderKit",
@@ -22,8 +33,9 @@ let package = Package(
         ),
         .testTarget(
             name: "GazeProtocolKitTests",
-            dependencies: ["GazeProtocolKit"],
+            dependencies: ["GazeProtocolKit", "GazeCoreKit"],
             path: "tests/GazeProtocolKitTests"
         ),
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

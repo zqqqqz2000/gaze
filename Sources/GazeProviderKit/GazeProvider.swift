@@ -88,12 +88,16 @@ public final class GazeProvider: NSObject, ARSessionDelegate {
         let leftEyeOrigin = leftEyeTransform.translation
         let rightEyeOrigin = rightEyeTransform.translation
         let gazeOrigin = (leftEyeOrigin + rightEyeOrigin) / 2.0
-
-        let lookAtProvider = simd_mul(faceTransform, SIMD4<Float>(faceAnchor.lookAtPoint.x, faceAnchor.lookAtPoint.y, faceAnchor.lookAtPoint.z, 1.0))
-        let fusedDirection = simd_normalize(SIMD3<Float>(lookAtProvider.x, lookAtProvider.y, lookAtProvider.z) - gazeOrigin)
-
         let leftDirection = simd_normalize(leftEyeTransform.forwardAxis)
         let rightDirection = simd_normalize(rightEyeTransform.forwardAxis)
+        let lookAtProvider = simd_mul(faceTransform, SIMD4<Float>(faceAnchor.lookAtPoint.x, faceAnchor.lookAtPoint.y, faceAnchor.lookAtPoint.z, 1.0))
+        let lookAtPoint = SIMD3<Float>(lookAtProvider.x, lookAtProvider.y, lookAtProvider.z)
+        let lookAtDirection = simd_normalize(lookAtPoint - gazeOrigin)
+        let fusedDirection = fusedEyeDirection(
+            leftDirection: leftDirection,
+            rightDirection: rightDirection,
+            fallbackDirection: lookAtDirection
+        )
         let headQuaternion = simd_quatf(faceTransform)
         let headPosition = faceTransform.translation
 
@@ -128,6 +132,18 @@ public final class GazeProvider: NSObject, ARSessionDelegate {
     }
 }
 
+private func fusedEyeDirection(
+    leftDirection: SIMD3<Float>,
+    rightDirection: SIMD3<Float>,
+    fallbackDirection: SIMD3<Float>
+) -> SIMD3<Float> {
+    let averaged = simd_normalize(leftDirection + rightDirection)
+    guard averaged.allFinite else {
+        return fallbackDirection
+    }
+    return simd_dot(averaged, fallbackDirection) >= 0 ? averaged : -averaged
+}
+
 private extension simd_float4x4 {
     var translation: SIMD3<Float> {
         SIMD3<Float>(columns.3.x, columns.3.y, columns.3.z)
@@ -141,6 +157,10 @@ private extension simd_float4x4 {
 private extension SIMD3 where Scalar == Float {
     var array3: [Float] {
         [x, y, z]
+    }
+
+    var allFinite: Bool {
+        x.isFinite && y.isFinite && z.isFinite
     }
 }
 #endif

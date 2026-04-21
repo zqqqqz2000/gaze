@@ -1,8 +1,8 @@
 import AppKit
 import Foundation
+import GazeCoreKit
 import GazeProtocolKit
 import QuartzCore
-import simd
 
 @MainActor
 final class BeamHostViewModel: ObservableObject {
@@ -34,20 +34,21 @@ final class BeamHostViewModel: ObservableObject {
     @Published var logLines: [String] = []
 
     let listenerPort: UInt16 = 9000
-    var hasCalibration: Bool { calibrationModel != nil }
+    var hasCalibration: Bool { calibration != nil }
     var isCalibrating: Bool { calibrationTask != nil }
 
     private let overlayModel = BeamOverlayModel()
     private lazy var overlayController = BeamOverlayWindowController(model: overlayModel)
     private let sampleServer = ProviderSampleServer()
-    private let mapper = GazeScreenMapper()
+    private let uncalibratedMapper = GazeScreenMapper()
     private let shouldAutoPreview = ProcessInfo.processInfo.environment["GAZE_BEAM_PREVIEW"] == "1"
     private var didStart = false
     private var previewTimer: Timer?
-    private var calibrationModel: ScreenPlaneCalibrationModel?
+    private var calibration: GazeCalibration?
     private var calibrationCollector: CalibrationCollector?
     private var calibrationTask: Task<Void, Never>?
     private let calibrationPersistence = CalibrationPersistence()
+    private var lastRuntimeStatus = "idle"
 
     init() {
         overlayModel.baseRadius = CGFloat(beamSize)
@@ -108,11 +109,18 @@ final class BeamHostViewModel: ObservableObject {
         confidenceText = String(format: "%.2f", sample.confidence)
         collectCalibrationSampleIfNeeded(sample: sample)
 
-        let point = mapToScreen(sample: sample)
-        pointText = String(format: "%.0f, %.0f", point.x, point.y)
+        guard let mappedPoint = mapToScreen(sample: sample) else {
+            pointText = "-"
+            if !previewEnabled {
+                overlayModel.clearTarget()
+            }
+            return
+        }
+
+        pointText = mappedPoint.debugDescription
 
         if !previewEnabled && sample.confidence >= 0.35 && sample.trackingFlags == 1 {
-            overlayModel.setTarget(point)
+            overlayModel.setTarget(mappedPoint.point)
         } else if !previewEnabled {
             overlayModel.clearTarget()
         }
@@ -124,14 +132,18 @@ final class BeamHostViewModel: ObservableObject {
         }
     }
 
+    private var mainScreen: NSScreen? {
+        NSScreen.main ?? NSScreen.screens.first
+    }
+
     private var mainScreenFrame: CGRect {
-        NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        mainScreen?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
     }
 
     func startCalibration() {
         calibrationTask?.cancel()
         calibrationTask = nil
-        calibrationModel = nil
+        calibration = nil
         calibrationStatus = "starting calibration"
         calibrationDetail = "hold gaze on each target until it disappears"
         overlayEnabled = true
@@ -146,7 +158,7 @@ final class BeamHostViewModel: ObservableObject {
         calibrationTask?.cancel()
         calibrationTask = nil
         calibrationCollector = nil
-        calibrationModel = nil
+        calibration = nil
         overlayModel.setCalibrationTarget(nil)
         calibrationStatus = "uncalibrated"
         calibrationDetail = "run 9-point host calibration"
@@ -166,7 +178,18 @@ final class BeamHostViewModel: ObservableObject {
             calibrationTask = nil
         }
 
-        var fittedSamples: [ScreenPlaneCalibrationSample] = []
+        guard let displayContext = makeDisplayContext() else {
+            calibrationStatus = "calibration failed"
+            calibrationDetail = "main screen metrics unavailable"
+            appendLog("calibration failed: screen metrics unavailable")
+            return
+        }
+        guard let calibrationSession = GazeCalibrationSession(display: displayContext.descriptor, mode: .full) else {
+            calibrationStatus = "calibration failed"
+            calibrationDetail = "core calibration session could not start"
+            appendLog("calibration failed: session init returned nil")
+            return
+        }
 
         for (index, normalizedTarget) in CalibrationGrid.targets.enumerated() {
             if Task.isCancelled {
@@ -177,8 +200,7 @@ final class BeamHostViewModel: ObservableObject {
 
             calibrationStatus = "fixate \(index + 1)/\(CalibrationGrid.targets.count)"
             calibrationDetail = "waiting for stable samples"
-            let targetPoint = screenPoint(fromNormalized: normalizedTarget)
-            overlayModel.setCalibrationTarget(targetPoint)
+            overlayModel.setCalibrationTarget(screenPoint(fromNormalized: normalizedTarget, in: displayContext.frame))
             calibrationCollector = CalibrationCollector(
                 stepIndex: index,
                 targetNormalized: normalizedTarget,
@@ -195,41 +217,47 @@ final class BeamHostViewModel: ObservableObject {
                 return
             }
 
-            guard let averagedRay = collector.averageRaySample(minimumCount: 10) else {
+            guard let stableSamples = collector.stableSamples(minimumCount: 10) else {
                 calibrationStatus = "insufficient data at point \(index + 1)"
                 calibrationDetail = "need at least 10 confident samples"
                 appendLog("calibration failed at point \(index + 1): insufficient stable samples")
                 return
             }
 
-            fittedSamples.append(
-                ScreenPlaneCalibrationSample(
-                    origin: averagedRay.origin,
-                    direction: averagedRay.direction,
-                    targetX: Double(normalizedTarget.x),
-                    targetY: Double(normalizedTarget.y)
+            do {
+                try calibrationSession.pushTarget(
+                    u: Float(normalizedTarget.x),
+                    v: Float(normalizedTarget.y),
+                    targetID: UInt32(index)
                 )
-            )
-            appendLog("captured calibration point \(index + 1)/\(CalibrationGrid.targets.count)")
+                for sample in stableSamples {
+                    try calibrationSession.pushSample(sample, targetID: UInt32(index))
+                }
+            } catch {
+                calibrationStatus = "calibration failed"
+                calibrationDetail = error.localizedDescription
+                appendLog("calibration failed at point \(index + 1): \(error.localizedDescription)")
+                return
+            }
+
+            appendLog("captured calibration point \(index + 1)/\(CalibrationGrid.targets.count) with \(stableSamples.count) samples")
         }
 
-        guard let calibrationModel = ScreenPlaneCalibrationModel(samples: fittedSamples) else {
-            calibrationStatus = "calibration fit failed"
-            calibrationDetail = "screen plane solve became singular"
-            appendLog("calibration fit failed")
-            return
-        }
-
-        let rmsError = calibrationModel.rootMeanSquareError(samples: fittedSamples)
-        self.calibrationModel = calibrationModel
-        calibrationStatus = "calibration complete"
-        calibrationDetail = String(format: "saved locally, rms %.4f", rmsError)
         do {
-            try calibrationPersistence.save(calibrationModel)
+            let solvedCalibration = try calibrationSession.solve()
+            calibration = solvedCalibration
+            calibrationStatus = "calibration complete"
+            calibrationDetail = calibrationSummary(for: solvedCalibration)
+            try calibrationPersistence.save(solvedCalibration)
+            appendLog("calibration complete: \(calibrationSummary(for: solvedCalibration))")
+            if solvedCalibration.rmsePixels > 120 {
+                appendLog("warning: calibration rmse is high; check fixation stability and screen metrics")
+            }
         } catch {
-            appendLog("failed to persist calibration: \(error.localizedDescription)")
+            calibrationStatus = "calibration fit failed"
+            calibrationDetail = error.localizedDescription
+            appendLog("calibration fit failed: \(error.localizedDescription)")
         }
-        appendLog("calibration complete")
     }
 
     private func configurePreviewTimer() {
@@ -250,11 +278,10 @@ final class BeamHostViewModel: ObservableObject {
                 let frame = self.mainScreenFrame
                 let normalizedX = 0.5 + CGFloat(sin(elapsed * 0.9)) * 0.28
                 let normalizedY = 0.5 + CGFloat(cos(elapsed * 1.4)) * 0.18 + CGFloat(sin(elapsed * 0.4)) * 0.06
-                let point = CGPoint(
-                    x: frame.minX + normalizedX * frame.width,
-                    y: frame.maxY - normalizedY * frame.height
-                )
-                self.overlayModel.setTarget(point)
+                self.overlayModel.setTarget(self.screenPoint(
+                    fromNormalized: CGPoint(x: normalizedX, y: normalizedY),
+                    in: frame
+                ))
             }
         }
         RunLoop.main.add(previewTimer!, forMode: .common)
@@ -267,41 +294,62 @@ final class BeamHostViewModel: ObservableObject {
         guard sample.confidence >= 0.45 else {
             return
         }
-        guard let raySample = CalibrationRaySample(providerSample: sample) else {
-            return
-        }
 
         let now = CACurrentMediaTime()
         guard now >= collector.collectionStart, now <= collector.collectionEnd else {
             return
         }
 
-        collector.raySamples.append(raySample)
+        collector.samples.append(sample)
         calibrationCollector = collector
         calibrationStatus = "fixate \(collector.stepIndex + 1)/\(CalibrationGrid.targets.count)"
-        calibrationDetail = "\(collector.raySamples.count) stable samples"
+        calibrationDetail = "\(collector.samples.count) stable samples"
     }
 
-    private func mapToScreen(sample: ProviderSamplePayload) -> CGPoint {
-        if
-            let calibrationModel,
-            let raySample = CalibrationRaySample(providerSample: sample),
-            let normalized = calibrationModel.map(origin: raySample.origin, direction: raySample.direction)
-        {
-            return screenPoint(
-                fromNormalized: CGPoint(
-                    x: clamp(CGFloat(normalized.x), min: 0.03, max: 0.97),
-                    y: clamp(CGFloat(normalized.y), min: 0.03, max: 0.97)
-                )
-            )
+    private func mapToScreen(sample: ProviderSamplePayload) -> MappedPoint? {
+        guard let displayContext = makeDisplayContext() else {
+            updateRuntimeStatus("screen metrics unavailable")
+            return nil
         }
-        return mapper.map(sample: sample, in: mainScreenFrame)
+
+        if let calibration {
+            do {
+                let solvedPoint = try calibration.solvePoint(sample: sample, display: displayContext.descriptor)
+                updateRuntimeStatus("core solve active")
+                let normalized = CGPoint(
+                    x: clamp(CGFloat(solvedPoint.u), min: 0.0, max: 1.0),
+                    y: clamp(CGFloat(solvedPoint.v), min: 0.0, max: 1.0)
+                )
+                let point = screenPoint(fromNormalized: normalized, in: displayContext.frame)
+                return MappedPoint(
+                    point: point,
+                    debugDescription: String(
+                        format: "%.0f, %.0f | u=%.3f v=%.3f%@",
+                        point.x,
+                        point.y,
+                        solvedPoint.u,
+                        solvedPoint.v,
+                        solvedPoint.insideScreen ? "" : " edge"
+                    )
+                )
+            } catch {
+                updateRuntimeStatus("core solve fallback: \(error.localizedDescription)")
+            }
+        } else {
+            updateRuntimeStatus("uncalibrated heuristic")
+        }
+
+        let fallbackPoint = uncalibratedMapper.map(sample: sample, in: displayContext.frame)
+        return MappedPoint(
+            point: fallbackPoint,
+            debugDescription: String(format: "%.0f, %.0f | heuristic", fallbackPoint.x, fallbackPoint.y)
+        )
     }
 
-    private func screenPoint(fromNormalized normalizedPoint: CGPoint) -> CGPoint {
+    private func screenPoint(fromNormalized normalizedPoint: CGPoint, in frame: CGRect) -> CGPoint {
         CGPoint(
-            x: mainScreenFrame.minX + normalizedPoint.x * mainScreenFrame.width,
-            y: mainScreenFrame.maxY - normalizedPoint.y * mainScreenFrame.height
+            x: frame.minX + normalizedPoint.x * frame.width,
+            y: frame.maxY - normalizedPoint.y * frame.height
         )
     }
 
@@ -321,33 +369,94 @@ final class BeamHostViewModel: ObservableObject {
 
     private func restoreCalibrationIfAvailable() {
         do {
-            guard let savedModel = try calibrationPersistence.load() else {
+            guard let savedCalibration = try calibrationPersistence.load() else {
                 return
             }
-            calibrationModel = savedModel
+            calibration = savedCalibration
             calibrationStatus = "calibration restored"
-            calibrationDetail = "loaded saved host calibration"
-            appendLog("restored saved calibration")
+            calibrationDetail = calibrationSummary(for: savedCalibration)
+            appendLog("restored saved calibration: \(calibrationSummary(for: savedCalibration))")
         } catch {
             calibrationStatus = "uncalibrated"
             calibrationDetail = "saved calibration could not be loaded"
             appendLog("failed to restore calibration: \(error.localizedDescription)")
         }
     }
+
+    private func makeDisplayContext() -> DisplayContext? {
+        guard let screen = mainScreen else {
+            return nil
+        }
+        guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+
+        let displayID = CGDirectDisplayID(truncating: screenNumber)
+        let widthPixels = UInt32(CGDisplayPixelsWide(displayID))
+        let heightPixels = UInt32(CGDisplayPixelsHigh(displayID))
+        guard widthPixels > 0, heightPixels > 0 else {
+            return nil
+        }
+
+        var physicalSize = CGDisplayScreenSize(displayID)
+        if physicalSize.width <= 0 || physicalSize.height <= 0 {
+            let fallbackMMPerPixel = CGFloat(25.4 / 110.0)
+            physicalSize = CGSize(
+                width: CGFloat(widthPixels) * fallbackMMPerPixel,
+                height: CGFloat(heightPixels) * fallbackMMPerPixel
+            )
+        }
+
+        return DisplayContext(
+            frame: screen.frame,
+            descriptor: GazeDisplayDescriptor(
+                screenWidthMM: Float(physicalSize.width),
+                screenHeightMM: Float(physicalSize.height),
+                widthPixels: widthPixels,
+                heightPixels: heightPixels
+            )
+        )
+    }
+
+    private func calibrationSummary(for calibration: GazeCalibration) -> String {
+        String(
+            format: "rmse %.1f px, median %.1f px, samples %u",
+            calibration.rmsePixels,
+            calibration.medianErrorPixels,
+            calibration.sampleCount
+        )
+    }
+
+    private func updateRuntimeStatus(_ status: String) {
+        guard status != lastRuntimeStatus else {
+            return
+        }
+        lastRuntimeStatus = status
+        appendLog(status)
+    }
+}
+
+private struct DisplayContext {
+    let frame: CGRect
+    let descriptor: GazeDisplayDescriptor
+}
+
+private struct MappedPoint {
+    let point: CGPoint
+    let debugDescription: String
 }
 
 private struct GazeScreenMapper {
     private let horizontalGain: CGFloat = 6.4
     private let verticalGain: CGFloat = 7.2
     private let verticalBias: CGFloat = 0.01
-    private let inset: CGFloat = 0.04
 
     func map(sample: ProviderSamplePayload, in frame: CGRect) -> CGPoint {
         let rawX = CGFloat(sample.lookAtPointFM[0])
         let rawY = CGFloat(sample.lookAtPointFM[1])
 
-        let normalizedX = clamp(0.5 + rawX * horizontalGain, min: inset, max: 1.0 - inset)
-        let normalizedY = clamp(0.5 - (rawY - verticalBias) * verticalGain, min: inset, max: 1.0 - inset)
+        let normalizedX = clamp(0.5 + rawX * horizontalGain, min: 0.0, max: 1.0)
+        let normalizedY = clamp(0.5 - (rawY - verticalBias) * verticalGain, min: 0.0, max: 1.0)
 
         return CGPoint(
             x: frame.minX + normalizedX * frame.width,
