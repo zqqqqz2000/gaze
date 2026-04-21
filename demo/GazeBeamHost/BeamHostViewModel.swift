@@ -12,16 +12,12 @@ final class BeamHostViewModel: ObservableObject {
     @Published var confidenceText = "-"
     @Published var pointText = "-"
     @Published var localAddresses: [String] = []
+    @Published var usbBridgeStatus = "checking iproxy"
+    @Published var usbClientStatus = "idle"
     @Published var overlayEnabled = true {
         didSet {
             overlayController.setVisible(overlayEnabled)
             appendLog(overlayEnabled ? "overlay enabled" : "overlay hidden")
-        }
-    }
-    @Published var previewEnabled = false {
-        didSet {
-            configurePreviewTimer()
-            appendLog(previewEnabled ? "preview motion enabled" : "preview motion disabled")
         }
     }
     @Published var beamSize: Double = 88 {
@@ -32,23 +28,31 @@ final class BeamHostViewModel: ObservableObject {
     @Published var calibrationStatus = "uncalibrated"
     @Published var calibrationDetail = "run 9-point host calibration"
     @Published var logLines: [String] = []
+    @Published var logFilePath = HostFileLogger.shared.logFileURL.path
 
     let listenerPort: UInt16 = 9000
+    let usbForwardedLocalPort: UInt16 = 9101
+    let usbDevicePort: UInt16 = 9100
     var hasCalibration: Bool { calibration != nil }
     var isCalibrating: Bool { calibrationTask != nil }
+    var isUSBBridgeRunning: Bool { usbBridge.isRunning }
+    var canStartUSBBridge: Bool { USBMuxBridge.resolveExecutablePath() != nil }
 
     private let overlayModel = BeamOverlayModel()
     private lazy var overlayController = BeamOverlayWindowController(model: overlayModel)
     private let sampleServer = ProviderSampleServer()
+    private let usbBridge = USBMuxBridge()
+    private let fileLogger = HostFileLogger.shared
     private let uncalibratedMapper = GazeScreenMapper()
-    private let shouldAutoPreview = ProcessInfo.processInfo.environment["GAZE_BEAM_PREVIEW"] == "1"
     private var didStart = false
-    private var previewTimer: Timer?
     private var calibration: GazeCalibration?
     private var calibrationCollector: CalibrationCollector?
     private var calibrationTask: Task<Void, Never>?
     private let calibrationPersistence = CalibrationPersistence()
     private var lastRuntimeStatus = "idle"
+    private var usbClient: ProviderSampleClient?
+    private var usbReconnectTask: Task<Void, Never>?
+    private var shouldMaintainUSBConnection = false
 
     init() {
         overlayModel.baseRadius = CGFloat(beamSize)
@@ -56,6 +60,12 @@ final class BeamHostViewModel: ObservableObject {
         sampleServer.onEvent = { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handle(event: event)
+            }
+        }
+
+        usbBridge.onEvent = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleUSBBridgeEvent(event)
             }
         }
     }
@@ -66,7 +76,9 @@ final class BeamHostViewModel: ObservableObject {
         }
         didStart = true
         localAddresses = LocalIPAddressProvider.ipv4Addresses()
+        refreshUSBAvailability()
         overlayController.show()
+        appendLog("host log file: \(logFilePath)")
 
         do {
             try sampleServer.start(port: listenerPort)
@@ -78,10 +90,35 @@ final class BeamHostViewModel: ObservableObject {
         }
 
         restoreCalibrationIfAvailable()
+    }
 
-        if shouldAutoPreview {
-            previewEnabled = true
+    func startUSBBridge() {
+        usbReconnectTask?.cancel()
+        stopUSBClient()
+        shouldMaintainUSBConnection = true
+
+        do {
+            try usbBridge.start(localPort: usbForwardedLocalPort, devicePort: usbDevicePort)
+            usbBridgeStatus = "forwarding localhost:\(usbForwardedLocalPort) -> device:\(usbDevicePort)"
+            appendLog("USB bridge started: localhost:\(usbForwardedLocalPort) -> device:\(usbDevicePort)")
+            connectUSBClient()
+        } catch {
+            shouldMaintainUSBConnection = false
+            usbBridgeStatus = "failed"
+            usbClientStatus = error.localizedDescription
+            appendLog("USB bridge failed: \(error.localizedDescription)")
         }
+    }
+
+    func stopUSBBridge() {
+        shouldMaintainUSBConnection = false
+        usbReconnectTask?.cancel()
+        usbReconnectTask = nil
+        stopUSBClient()
+        usbBridge.stop()
+        usbClientStatus = "idle"
+        usbBridgeStatus = canStartUSBBridge ? "stopped" : "iproxy not installed"
+        appendLog("USB bridge stopped")
     }
 
     private func handle(event: ProviderSampleServer.Event) {
@@ -104,6 +141,91 @@ final class BeamHostViewModel: ObservableObject {
         }
     }
 
+    private func connectUSBClient() {
+        guard shouldMaintainUSBConnection else {
+            return
+        }
+        stopUSBClient()
+        appendLog("starting USB sample client to 127.0.0.1:\(usbForwardedLocalPort)")
+
+        let client = ProviderSampleClient(host: "127.0.0.1", port: usbForwardedLocalPort)
+        client.onEvent = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleUSBClientEvent(event)
+            }
+        }
+        usbClient = client
+        client.start()
+    }
+
+    private func stopUSBClient() {
+        usbClient?.stop()
+        usbClient = nil
+    }
+
+    private func scheduleUSBReconnect() {
+        guard shouldMaintainUSBConnection else {
+            return
+        }
+        usbReconnectTask?.cancel()
+        usbReconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, !Task.isCancelled else {
+                return
+            }
+            self.connectUSBClient()
+        }
+    }
+
+    private func handleUSBBridgeEvent(_ event: USBMuxBridge.Event) {
+        switch event {
+        case .started(let executablePath):
+            appendLog("iproxy launched from \(executablePath)")
+        case .output(let line):
+            appendLog("iproxy: \(line)")
+        case .stopped(let status):
+            shouldMaintainUSBConnection = false
+            stopUSBClient()
+            usbReconnectTask?.cancel()
+            usbReconnectTask = nil
+            usbBridgeStatus = "iproxy exited with \(status)"
+            usbClientStatus = status == 0 ? "idle" : "iproxy exited with \(status)"
+            appendLog("USB bridge exited with status \(status)")
+        }
+    }
+
+    private func handleUSBClientEvent(_ event: ProviderSampleClient.Event) {
+        switch event {
+        case .stateChanged(let message):
+            appendLog("USB sample client: \(message)")
+        case .connecting(let endpoint):
+            usbClientStatus = "connecting to \(endpoint)"
+        case .connected(let endpoint):
+            usbClientStatus = "connected to \(endpoint)"
+            appendLog("USB sample client connected: \(endpoint)")
+        case .connectionFailed(let message):
+            usbClientStatus = "waiting for iPhone USB stream"
+            appendLog("USB sample client connect failed: \(message)")
+            scheduleUSBReconnect()
+        case .disconnected(let endpoint):
+            usbClientStatus = shouldMaintainUSBConnection ? "waiting for iPhone USB stream" : "idle"
+            appendLog("USB sample client disconnected: \(endpoint)")
+            scheduleUSBReconnect()
+        case .receivedSample(let sample):
+            consume(sample: sample)
+        }
+    }
+
+    private func refreshUSBAvailability() {
+        if usbBridge.isRunning {
+            usbBridgeStatus = "forwarding localhost:\(usbForwardedLocalPort) -> device:\(usbDevicePort)"
+        } else if USBMuxBridge.resolveExecutablePath() != nil {
+            usbBridgeStatus = "ready on localhost:\(usbForwardedLocalPort)"
+        } else {
+            usbBridgeStatus = "iproxy not installed"
+        }
+    }
+
     private func consume(sample: ProviderSamplePayload) {
         sampleCount += 1
         confidenceText = String(format: "%.2f", sample.confidence)
@@ -111,17 +233,15 @@ final class BeamHostViewModel: ObservableObject {
 
         guard let mappedPoint = mapToScreen(sample: sample) else {
             pointText = "-"
-            if !previewEnabled {
-                overlayModel.clearTarget()
-            }
+            overlayModel.clearTarget()
             return
         }
 
         pointText = mappedPoint.debugDescription
 
-        if !previewEnabled && sample.confidence >= 0.35 && sample.trackingFlags == 1 {
+        if sample.confidence >= 0.35 && sample.trackingFlags == 1 {
             overlayModel.setTarget(mappedPoint.point)
-        } else if !previewEnabled {
+        } else {
             overlayModel.clearTarget()
         }
 
@@ -147,7 +267,6 @@ final class BeamHostViewModel: ObservableObject {
         calibrationStatus = "starting calibration"
         calibrationDetail = "hold gaze on each target until it disappears"
         overlayEnabled = true
-        previewEnabled = false
 
         calibrationTask = Task { @MainActor [weak self] in
             await self?.runCalibration()
@@ -260,33 +379,6 @@ final class BeamHostViewModel: ObservableObject {
         }
     }
 
-    private func configurePreviewTimer() {
-        previewTimer?.invalidate()
-        previewTimer = nil
-
-        guard previewEnabled else {
-            return
-        }
-
-        let start = CACurrentMediaTime()
-        previewTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else {
-                    return
-                }
-                let elapsed = CACurrentMediaTime() - start
-                let frame = self.mainScreenFrame
-                let normalizedX = 0.5 + CGFloat(sin(elapsed * 0.9)) * 0.28
-                let normalizedY = 0.5 + CGFloat(cos(elapsed * 1.4)) * 0.18 + CGFloat(sin(elapsed * 0.4)) * 0.06
-                self.overlayModel.setTarget(self.screenPoint(
-                    fromNormalized: CGPoint(x: normalizedX, y: normalizedY),
-                    in: frame
-                ))
-            }
-        }
-        RunLoop.main.add(previewTimer!, forMode: .common)
-    }
-
     private func collectCalibrationSampleIfNeeded(sample: ProviderSamplePayload) {
         guard var collector = calibrationCollector else {
             return
@@ -358,13 +450,20 @@ final class BeamHostViewModel: ObservableObject {
     }
 
     private func appendLog(_ message: String) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = timestampString(for: Date())
         let line = "[\(timestamp)] \(message)"
+        fileLogger.append(line)
         print(line)
         logLines.insert(line, at: 0)
         if logLines.count > 30 {
             logLines.removeLast(logLines.count - 30)
         }
+    }
+
+    private func timestampString(for date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     private func restoreCalibrationIfAvailable() {

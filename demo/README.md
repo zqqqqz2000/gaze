@@ -28,15 +28,14 @@ demo/GazeDemoApp.xcodeproj
 - 需要相机权限
 - 不能用模拟器验证真实 face tracking
 
-## USB 是否必须
+## 连接方式
 
-不是功能上必须，但**第一次部署和调试时建议用 USB**：
+现在 demo 支持两种把 iPhone sample 送到 Mac 的方式：
 
-- 第一次装 app 到手机，USB 最稳
-- 第一次建立信任关系，USB 最稳
-- 如果你已经在 Xcode 里配好了无线调试，后续可以不用 USB
+- `LAN`：iPhone 主动连到 Mac 的 `host:port`
+- `USB`：iPhone 作为 listener，Mac 通过 `iproxy` 把本地端口转发到设备端口后主动拉流
 
-对 gaze stream 本身来说，**不需要 USB**。如果后面要把样本发回 Mac，走同一局域网即可。
+如果只是第一次部署和调试，USB 仍然更稳；如果是日常跑 demo，LAN 和 USB 都可以。
 
 ## Demo 功能
 
@@ -45,11 +44,13 @@ demo/GazeDemoApp.xcodeproj
 - 启动 / 停止 `GazeProvider`
 - 展示 provider state
 - 展示最新 sample 的 confidence、face distance、gaze origin、gaze dir
-- 可选连接 host IP + port，发送 sample stream
+- `LAN` 模式下可填写 host IP + port，主动推送 sample
+- `USB` 模式下在设备本地监听 `9100` 端口，等待 Mac 侧通过 USB bridge 拉流
 
 ### macOS Host
 
 - 监听 `9000` 端口接收 iPhone sample
+- 可启动 `iproxy`，把 `localhost:9101` 转发到 iPhone `9100`
 - 在屏幕最上层渲染半透明 beam overlay
 - overlay 不抢焦点，鼠标事件直接穿透
 - 9 点校准
@@ -58,12 +59,13 @@ demo/GazeDemoApp.xcodeproj
 ## 端到端校准步骤
 
 1. 先启动 `GazeBeamHost`
-2. 记下 host 窗口里显示的本机 IP，例如 `192.168.x.x:9000`
-3. 在 iPhone `GazeDemoApp` 里填入同样的 host 和 port
-4. iPhone 开始 tracking，并开启 stream
-5. 在 Mac 端点击 `Start Calibration`
-6. 依次盯住屏幕上出现的 9 个校准点，等待每个点自动采样完成
-7. 状态显示 `calibration complete` 后，host 会自动保存本次校准
+2. 选择连接方式：
+   - `LAN`：记下 host 窗口里显示的本机 IP，例如 `192.168.x.x:9000`，在 iPhone `GazeDemoApp` 里填入同样的 host 和 port
+   - `USB`：用数据线连接 iPhone 和 Mac，在 Mac 上安装 `iproxy`，然后点击 host 窗口里的 `Start USB Bridge`，iPhone 端切到 `USB` 模式
+3. iPhone 开始 tracking，并开启 stream
+4. 在 Mac 端点击 `Start Calibration`
+5. 依次盯住屏幕上出现的 9 个校准点，等待每个点自动采样完成
+6. 状态显示 `calibration complete` 后，host 会自动保存本次校准
 
 如果要重新做校准，点击 `Clear Calibration` 后再重新开始。
 
@@ -71,5 +73,11 @@ demo/GazeDemoApp.xcodeproj
 
 - 如果 `Start Tracking` 报错 `ARFaceTracking not supported`，说明设备不支持
 - 如果 app 能启动但没有 sample，多半是没授权相机，或前摄没有看到人脸
-- 如果网络流发不出去，先确认 iPhone 和 Mac 在同一网段
+- 如果 `LAN` 流发不出去，先确认 iPhone 和 Mac 在同一网段
+- 如果 `USB` 一直连不上，先确认 iPhone 已用线连到 Mac，并安装了 `iproxy`：
+
+```bash
+brew install libimobiledevice
+```
+
 - 如果 host 没有响应校准，先看 `Log` 区域里是否已经收到 `first streamed sample received`

@@ -21,35 +21,28 @@ struct BeamOverlayRootView: View {
                     context.stroke(innerRing, with: .color(edgeColor.opacity(0.84)), lineWidth: 1.6)
                 }
 
-                guard let currentPoint = snapshot.currentPoint else {
+                guard let currentPoint = snapshot.leadPoint else {
                     return
                 }
 
                 let current = localPoint(for: currentPoint)
-                let endCircle = circlePath(center: current, radius: snapshot.endRadius)
+                let beamPath: Path
 
-                if let anchorPoint = snapshot.anchorPoint {
-                    let anchor = localPoint(for: anchorPoint)
-                    let startCircle = circlePath(center: anchor, radius: snapshot.startRadius)
-                    let bridge = bridgePath(
-                        from: anchor,
+                if let trailPoint = snapshot.trailPoint {
+                    let trail = localPoint(for: trailPoint)
+                    beamPath = mergedBeamPath(
+                        from: trail,
                         to: current,
-                        startRadius: snapshot.startRadius,
-                        endRadius: snapshot.endRadius
+                        startRadius: snapshot.trailRadius,
+                        endRadius: snapshot.leadRadius
                     )
-
-                    drawGlow(for: bridge, in: &context)
-                    context.fill(bridge, with: .color(beamColor.opacity(0.14)))
-                    context.stroke(bridge, with: .color(edgeColor.opacity(0.82)), lineWidth: 2.0)
-
-                    drawGlow(for: startCircle, in: &context)
-                    context.fill(startCircle, with: .color(beamColor.opacity(0.10)))
-                    context.stroke(startCircle, with: .color(edgeColor.opacity(0.78)), lineWidth: 1.8)
+                } else {
+                    beamPath = circlePath(center: current, radius: snapshot.leadRadius)
                 }
 
-                drawGlow(for: endCircle, in: &context)
-                context.fill(endCircle, with: .color(beamColor.opacity(0.18)))
-                context.stroke(endCircle, with: .color(edgeColor), lineWidth: 2.4)
+                drawGlow(for: beamPath, in: &context)
+                context.fill(beamPath, with: .color(beamColor.opacity(0.18)))
+                context.stroke(beamPath, with: .color(edgeColor), lineWidth: 2.4)
             }
             .ignoresSafeArea()
             .allowsHitTesting(false)
@@ -78,49 +71,115 @@ struct BeamOverlayRootView: View {
         ))
     }
 
-    private func bridgePath(from start: CGPoint, to end: CGPoint, startRadius: CGFloat, endRadius: CGFloat) -> Path {
+    private func mergedBeamPath(from start: CGPoint, to end: CGPoint, startRadius: CGFloat, endRadius: CGFloat) -> Path {
         let distance = start.distance(to: end)
         guard distance > 1 else {
-            return Path()
+            return circlePath(center: end, radius: max(startRadius, endRadius))
         }
 
-        let direction = CGPoint(x: (end.x - start.x) / distance, y: (end.y - start.y) / distance)
-        let normal = CGPoint(x: -direction.y, y: direction.x)
-        let stepCount = max(16, Int(distance / 14))
-
-        var left: [CGPoint] = []
-        var right: [CGPoint] = []
-        left.reserveCapacity(stepCount + 1)
-        right.reserveCapacity(stepCount + 1)
-
-        for index in 0...stepCount {
-            let t = CGFloat(index) / CGFloat(stepCount)
-            let point = start.lerp(to: end, t: t)
-            let radius = startRadius + (endRadius - startRadius) * t
-            left.append(point.offset(by: normal, scale: radius))
-            right.append(point.offset(by: normal, scale: -radius))
+        if distance <= abs(endRadius - startRadius) + 1 {
+            if startRadius >= endRadius {
+                return circlePath(center: start, radius: startRadius)
+            }
+            return circlePath(center: end, radius: endRadius)
         }
+
+        let centerAngle = atan2(end.y - start.y, end.x - start.x)
+        let tangentOffset = acos((startRadius - endRadius) / distance)
+        let sourceReference = centerAngle + .pi
+        let targetReference = centerAngle
+
+        let sourceTop = point(on: start, radius: startRadius, angle: centerAngle + tangentOffset)
+        let sourceBottom = point(on: start, radius: startRadius, angle: centerAngle - tangentOffset)
+        let targetTop = point(on: end, radius: endRadius, angle: centerAngle + tangentOffset)
+        let targetBottom = point(on: end, radius: endRadius, angle: centerAngle - tangentOffset)
+
+        let handle = min(distance * 0.35, max(startRadius, endRadius) * 1.1)
 
         var path = Path()
-        path.move(to: left[0])
-        for point in left.dropFirst() {
+        path.move(to: sourceTop)
+        path.addCurve(
+            to: targetTop,
+            control1: sourceTop.offset(dx: handle * cos(centerAngle), dy: handle * sin(centerAngle)),
+            control2: targetTop.offset(dx: -handle * cos(centerAngle), dy: -handle * sin(centerAngle))
+        )
+
+        for point in arcPoints(
+            center: end,
+            radius: endRadius,
+            startAngle: centerAngle + tangentOffset,
+            endAngle: centerAngle - tangentOffset,
+            referenceAngle: targetReference
+        ).dropFirst() {
             path.addLine(to: point)
         }
-        for point in right.reversed() {
+
+        path.addCurve(
+            to: sourceBottom,
+            control1: targetBottom.offset(dx: -handle * cos(centerAngle), dy: -handle * sin(centerAngle)),
+            control2: sourceBottom.offset(dx: handle * cos(centerAngle), dy: handle * sin(centerAngle))
+        )
+
+        for point in arcPoints(
+            center: start,
+            radius: startRadius,
+            startAngle: centerAngle - tangentOffset,
+            endAngle: centerAngle + tangentOffset,
+            referenceAngle: sourceReference
+        ).dropFirst() {
             path.addLine(to: point)
         }
+
         path.closeSubpath()
         return path
+    }
+
+    private func arcPoints(
+        center: CGPoint,
+        radius: CGFloat,
+        startAngle: CGFloat,
+        endAngle: CGFloat,
+        referenceAngle: CGFloat
+    ) -> [CGPoint] {
+        let normalizedStart = normalize(startAngle - referenceAngle)
+        let normalizedEnd = normalize(endAngle - referenceAngle)
+        let steps = 24
+
+        let sampledAngles: [CGFloat]
+        if normalizedStart >= normalizedEnd {
+            sampledAngles = stride(from: normalizedStart, through: normalizedEnd, by: -(normalizedStart - normalizedEnd) / CGFloat(steps)).map {
+                referenceAngle + $0
+            }
+        } else {
+            sampledAngles = stride(from: normalizedStart, through: normalizedEnd, by: (normalizedEnd - normalizedStart) / CGFloat(steps)).map {
+                referenceAngle + $0
+            }
+        }
+
+        return sampledAngles.map { point(on: center, radius: radius, angle: $0) }
+    }
+
+    private func point(on center: CGPoint, radius: CGFloat, angle: CGFloat) -> CGPoint {
+        CGPoint(
+            x: center.x + cos(angle) * radius,
+            y: center.y + sin(angle) * radius
+        )
+    }
+
+    private func normalize(_ angle: CGFloat) -> CGFloat {
+        var adjusted = angle.truncatingRemainder(dividingBy: .pi * 2)
+        if adjusted > .pi {
+            adjusted -= .pi * 2
+        } else if adjusted < -.pi {
+            adjusted += .pi * 2
+        }
+        return adjusted
     }
 }
 
 private extension CGPoint {
-    func lerp(to other: CGPoint, t: CGFloat) -> CGPoint {
-        CGPoint(x: x + (other.x - x) * t, y: y + (other.y - y) * t)
-    }
-
-    func offset(by normal: CGPoint, scale: CGFloat) -> CGPoint {
-        CGPoint(x: x + normal.x * scale, y: y + normal.y * scale)
+    func offset(dx: CGFloat, dy: CGFloat) -> CGPoint {
+        CGPoint(x: x + dx, y: y + dy)
     }
 
     func distance(to other: CGPoint) -> CGFloat {

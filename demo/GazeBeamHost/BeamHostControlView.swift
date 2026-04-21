@@ -7,8 +7,10 @@ struct BeamHostControlView: View {
         VStack(alignment: .leading, spacing: 16) {
             GroupBox("Connection") {
                 VStack(alignment: .leading, spacing: 10) {
-                    keyValueRow("Listener", value: "\(viewModel.serverStatus) on \(viewModel.listenerPort)")
-                    keyValueRow("Client", value: viewModel.connectionStatus)
+                    keyValueRow("LAN Listener", value: "\(viewModel.serverStatus) on \(viewModel.listenerPort)")
+                    keyValueRow("LAN Client", value: viewModel.connectionStatus)
+                    keyValueRow("USB Bridge", value: viewModel.usbBridgeStatus)
+                    keyValueRow("USB Client", value: viewModel.usbClientStatus)
                     keyValueRow("Samples", value: "\(viewModel.sampleCount)")
                     keyValueRow("Confidence", value: viewModel.confidenceText)
                     keyValueRow("Last Point", value: viewModel.pointText)
@@ -19,7 +21,6 @@ struct BeamHostControlView: View {
             GroupBox("Beam") {
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("Show Overlay", isOn: $viewModel.overlayEnabled)
-                    Toggle("Preview Motion", isOn: $viewModel.previewEnabled)
 
                     HStack {
                         Text("Size")
@@ -54,7 +55,7 @@ struct BeamHostControlView: View {
 
             GroupBox("Connect iPhone") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("On the iPhone demo, set Host IP to one of these addresses and Port to \(viewModel.listenerPort).")
+                    Text("LAN: set Host IP to one of these addresses and Port to \(viewModel.listenerPort).")
                         .foregroundStyle(.secondary)
                     if viewModel.localAddresses.isEmpty {
                         Text("No local IPv4 address detected.")
@@ -65,23 +66,48 @@ struct BeamHostControlView: View {
                                 .font(.system(.body, design: .monospaced))
                         }
                     }
+
+                    Divider()
+
+                    Text("USB: connect the iPhone by cable, tap USB in the iPhone demo, then start the bridge here.")
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button(viewModel.isUSBBridgeRunning ? "Restart USB Bridge" : "Start USB Bridge") {
+                            viewModel.startUSBBridge()
+                        }
+                        .disabled(!viewModel.canStartUSBBridge)
+
+                        Button("Stop USB Bridge") {
+                            viewModel.stopUSBBridge()
+                        }
+                        .disabled(!viewModel.isUSBBridgeRunning)
+                    }
+                    Text("Requires `iproxy` from libimobiledevice. The host forwards localhost:\(viewModel.usbForwardedLocalPort) to device port \(viewModel.usbDevicePort).")
+                        .foregroundStyle(.secondary)
+                        .font(.system(.footnote))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             GroupBox("Log") {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(viewModel.logLines.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(viewModel.logFilePath)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(viewModel.logLines.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(maxHeight: .infinity)
             }
         }
         .padding(18)
