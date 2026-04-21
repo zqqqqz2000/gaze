@@ -211,8 +211,35 @@ Vec3 screen_point_to_provider(const gaze_display_desc_t& display, const Mat3& ro
     return mul(rotation, screen_point) + center;
 }
 
-Vec3 bias_correct_direction(const Vec3& direction, float yaw_bias, float pitch_bias) {
-    return normalized(mul(mul(rotation_y(yaw_bias), rotation_x(pitch_bias)), normalized(direction)));
+Mat3 mat3_from_quaternion(float qx, float qy, float qz, float qw) {
+    const float xx = qx * qx, yy = qy * qy, zz = qz * qz;
+    const float xy = qx * qy, xz = qx * qz, yz = qy * qz;
+    const float wx = qw * qx, wy = qw * qy, wz = qw * qz;
+    return Mat3{
+        Vec3{1.0f - 2.0f * (yy + zz), 2.0f * (xy + wz), 2.0f * (xz - wy)},
+        Vec3{2.0f * (xy - wz), 1.0f - 2.0f * (xx + zz), 2.0f * (yz + wx)},
+        Vec3{2.0f * (xz + wy), 2.0f * (yz - wx), 1.0f - 2.0f * (xx + yy)},
+    };
+}
+
+Mat3 head_rotation_from_sample(const gaze_provider_sample_t& sample) {
+    const float qx = sample.head_rot_p_f_q[0];
+    const float qy = sample.head_rot_p_f_q[1];
+    const float qz = sample.head_rot_p_f_q[2];
+    const float qw = sample.head_rot_p_f_q[3];
+    const float norm_sq = qx * qx + qy * qy + qz * qz + qw * qw;
+    if (norm_sq < 1e-8f) {
+        return identity_mat3();
+    }
+    const float inv_norm = 1.0f / std::sqrt(norm_sq);
+    return mat3_from_quaternion(qx * inv_norm, qy * inv_norm, qz * inv_norm, qw * inv_norm);
+}
+
+Vec3 bias_correct_direction(const Vec3& direction, float yaw_bias, float pitch_bias, const Mat3& R_provider_from_face) {
+    const Mat3 R_face_from_provider = transpose(R_provider_from_face);
+    const Vec3 dir_face = mul(R_face_from_provider, normalized(direction));
+    const Vec3 corrected = mul(mul(rotation_y(yaw_bias), rotation_x(pitch_bias)), dir_face);
+    return normalized(mul(R_provider_from_face, corrected));
 }
 
 float clamp01(float value) {
@@ -279,7 +306,8 @@ std::vector<float> build_residuals(
     for (const Observation& observation : observations) {
         const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
         const Vec3 raw_dir = make_vec3(observation.sample.gaze_dir_p);
-        const Vec3 corrected_dir = bias_correct_direction(raw_dir, state.yaw_bias, state.pitch_bias);
+        const Mat3 R_pf = head_rotation_from_sample(observation.sample);
+        const Vec3 corrected_dir = bias_correct_direction(raw_dir, state.yaw_bias, state.pitch_bias, R_pf);
         const Vec3 target = screen_point_to_provider(display, state.rotation, state.center, observation.target_uv);
         const Vec3 expected_dir = normalized(target - origin);
         const float weight = std::max(0.2f, observation.sample.confidence);
@@ -742,10 +770,12 @@ int gaze_solve_point(
 
     const Vec3 origin = make_vec3(sample->gaze_origin_p_m);
     const Vec3 raw_dir = make_vec3(sample->gaze_dir_p);
+    const Mat3 R_pf = head_rotation_from_sample(*sample);
     const Vec3 direction = bias_correct_direction(
         raw_dir,
         calibration->yaw_bias_rad * calibration->yaw_gain,
-        calibration->pitch_bias_rad * calibration->pitch_gain
+        calibration->pitch_bias_rad * calibration->pitch_gain,
+        R_pf
     );
 
     Vec3 hit{};

@@ -58,8 +58,22 @@ gaze_provider_sample_t make_sample(float origin_x, float origin_y, float origin_
     sample.gaze_dir_p[0] = dir_x;
     sample.gaze_dir_p[1] = dir_y;
     sample.gaze_dir_p[2] = dir_z;
+    sample.head_rot_p_f_q[3] = 1.0f;
     sample.confidence = 1.0f;
     sample.face_distance_m = 0.55f;
+    return sample;
+}
+
+gaze_provider_sample_t make_sample_with_head_yaw(
+    float origin_x, float origin_y, float origin_z,
+    float dir_x, float dir_y, float dir_z,
+    float head_yaw
+) {
+    gaze_provider_sample_t sample = make_sample(origin_x, origin_y, origin_z, dir_x, dir_y, dir_z);
+    sample.head_rot_p_f_q[0] = 0.0f;
+    sample.head_rot_p_f_q[1] = std::sin(head_yaw * 0.5f);
+    sample.head_rot_p_f_q[2] = 0.0f;
+    sample.head_rot_p_f_q[3] = std::cos(head_yaw * 0.5f);
     return sample;
 }
 
@@ -70,6 +84,43 @@ gaze_refit_observation_t make_refit_observation(float u, float v, const gaze_pro
     observation.sample = sample;
     return observation;
 }
+
+namespace test_math {
+
+struct V3 { float x, y, z; };
+
+V3 sub(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+
+V3 normalize(V3 v) {
+    float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return {v.x / l, v.y / l, v.z / l};
+}
+
+V3 rot_x(V3 v, float a) {
+    float c = std::cos(a), s = std::sin(a);
+    return {v.x, c * v.y - s * v.z, s * v.y + c * v.z};
+}
+
+V3 rot_y(V3 v, float a) {
+    float c = std::cos(a), s = std::sin(a);
+    return {c * v.x + s * v.z, v.y, -s * v.x + c * v.z};
+}
+
+V3 screen_point_front(float u, float v) {
+    return {(0.5f - u) * 0.6f, (0.5f - v) * 0.34f, 0.6f};
+}
+
+V3 biased_gaze(V3 eye, float target_u, float target_v,
+               float yaw_bias, float pitch_bias, float head_yaw) {
+    V3 target = screen_point_front(target_u, target_v);
+    V3 d_true = normalize(sub(target, eye));
+    V3 d_f = rot_y(d_true, -head_yaw);
+    V3 d1 = rot_y(d_f, -yaw_bias);
+    V3 d_biased_f = rot_x(d1, -pitch_bias);
+    return normalize(rot_y(d_biased_f, head_yaw));
+}
+
+}  // namespace test_math
 
 void test_runtime_solve_center() {
     const gaze_display_desc_t display = make_display();
@@ -248,6 +299,224 @@ void test_invalid_arguments() {
     );
 }
 
+void test_head_rotation_invariance() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.04f;
+    const float pitch_bias = -0.025f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "head inv: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    const test_math::V3 cal_eye{0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < targets.size(); ++i) {
+        expect_true(
+            gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i)) == GAZE_OK,
+            "head inv: push target"
+        );
+        const auto dir = test_math::biased_gaze(cal_eye, targets[i].first, targets[i].second, yaw_bias, pitch_bias, 0.0f);
+        const auto sample = make_sample_with_head_yaw(cal_eye.x, cal_eye.y, cal_eye.z, dir.x, dir.y, dir.z, 0.0f);
+        expect_true(gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i)) == GAZE_OK, "head inv: push sample");
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "head inv: solve");
+
+    {
+        const auto dir = test_math::biased_gaze({0, 0, 0}, 0.5f, 0.5f, yaw_bias, pitch_bias, 0.0f);
+        const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, 0.0f);
+        gaze_screen_point_t point{};
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "head inv: identity solve");
+        expect_near(point.u, 0.5f, 0.06f, "head inv: identity u");
+        expect_near(point.v, 0.5f, 0.06f, "head inv: identity v");
+    }
+
+    {
+        const float test_yaw = 0.4363f;
+        const test_math::V3 test_eye{0.08f, 0.01f, 0.02f};
+        const auto dir = test_math::biased_gaze(test_eye, 0.5f, 0.5f, yaw_bias, pitch_bias, test_yaw);
+        const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
+        gaze_screen_point_t point{};
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "head inv: 25deg solve");
+        expect_near(point.u, 0.5f, 0.06f, "head inv: 25deg u");
+        expect_near(point.v, 0.5f, 0.06f, "head inv: 25deg v");
+    }
+
+    {
+        const float test_yaw = -0.35f;
+        const test_math::V3 test_eye{-0.06f, 0.02f, 0.0f};
+        const auto dir = test_math::biased_gaze(test_eye, 0.2f, 0.8f, yaw_bias, pitch_bias, test_yaw);
+        const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
+        gaze_screen_point_t point{};
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "head inv: -20deg solve");
+        expect_near(point.u, 0.2f, 0.06f, "head inv: -20deg u");
+        expect_near(point.v, 0.8f, 0.06f, "head inv: -20deg v");
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_calibration_mixed_head_poses() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.035f;
+    const float pitch_bias = -0.02f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "mixed: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float head_yaws[] = {0.0f, 0.15f, -0.12f, -0.2f, 0.0f, 0.25f, 0.1f, -0.15f, 0.3f};
+    const test_math::V3 eyes[] = {
+        {0, 0, 0}, {0.03f, 0, 0.01f}, {-0.02f, 0.01f, 0},
+        {-0.05f, 0, 0}, {0, 0, 0}, {0.06f, 0.01f, 0.01f},
+        {0.02f, -0.01f, 0}, {-0.03f, 0, 0.01f}, {0.08f, 0, 0.02f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        expect_true(
+            gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i)) == GAZE_OK,
+            "mixed: push target"
+        );
+        const auto dir = test_math::biased_gaze(eyes[i], targets[i].first, targets[i].second, yaw_bias, pitch_bias, head_yaws[i]);
+        const auto sample = make_sample_with_head_yaw(eyes[i].x, eyes[i].y, eyes[i].z, dir.x, dir.y, dir.z, head_yaws[i]);
+        expect_true(gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i)) == GAZE_OK, "mixed: push sample");
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "mixed: solve");
+
+    const float test_yaw = 0.40f;
+    const test_math::V3 test_eye{0.1f, 0.0f, 0.03f};
+    const auto dir = test_math::biased_gaze(test_eye, 0.5f, 0.5f, yaw_bias, pitch_bias, test_yaw);
+    const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
+    gaze_screen_point_t point{};
+    expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "mixed: solve point");
+    expect_near(point.u, 0.5f, 0.06f, "mixed: center u");
+    expect_near(point.v, 0.5f, 0.06f, "mixed: center v");
+
+    gaze_cal_free(session);
+}
+
+void test_bias_correction_face_frame_multiple_targets() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.06f;
+    const float pitch_bias = -0.04f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "face frame: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const auto dir = test_math::biased_gaze({0, 0, 0}, targets[i].first, targets[i].second, yaw_bias, pitch_bias, 0.0f);
+        const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, 0.0f);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "face frame: solve");
+
+    const float test_yaw = 0.5236f;
+    const test_math::V3 test_eye{0.1f, 0.02f, 0.03f};
+    const std::vector<std::pair<float, float>> probes{
+        {0.3f, 0.3f}, {0.7f, 0.3f}, {0.5f, 0.5f}, {0.3f, 0.7f}, {0.7f, 0.7f},
+    };
+
+    for (const auto& [tu, tv] : probes) {
+        const auto dir = test_math::biased_gaze(test_eye, tu, tv, yaw_bias, pitch_bias, test_yaw);
+        const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
+        gaze_screen_point_t point{};
+        const int result = gaze_solve_point(&sample, &calibration, &display, &point);
+        expect_true(result == GAZE_OK, "face frame: solve point");
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "face frame u: actual=%.3f expected=%.2f", point.u, tu);
+        expect_near(point.u, tu, 0.07f, msg);
+        std::snprintf(msg, sizeof(msg), "face frame v: actual=%.3f expected=%.2f", point.v, tv);
+        expect_near(point.v, tv, 0.07f, msg);
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_head_translation_large_range() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.045f;
+    const float pitch_bias = -0.03f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "xlate: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const auto dir = test_math::biased_gaze({0, 0, 0}, targets[i].first, targets[i].second, yaw_bias, pitch_bias, 0.0f);
+        const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, 0.0f);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "xlate: solve");
+
+    const test_math::V3 eye_positions[] = {
+        {0.20f, 0.0f, 0.0f},
+        {-0.18f, 0.0f, 0.0f},
+        {0.0f, 0.15f, 0.0f},
+        {0.0f, -0.12f, 0.0f},
+        {0.0f, 0.0f, 0.10f},
+        {0.0f, 0.0f, -0.08f},
+        {0.15f, 0.10f, 0.05f},
+        {-0.12f, -0.08f, 0.07f},
+        {0.18f, -0.10f, -0.06f},
+        {-0.20f, 0.12f, 0.09f},
+        {0.10f, 0.14f, -0.05f},
+        {-0.07f, -0.15f, 0.10f},
+    };
+    const std::vector<std::pair<float, float>> probes{
+        {0.5f, 0.5f}, {0.2f, 0.2f}, {0.8f, 0.8f}, {0.3f, 0.7f}, {0.7f, 0.3f},
+    };
+
+    for (const auto& eye : eye_positions) {
+        const float head_yaw = std::atan2(eye.x, 0.6f) * 0.3f;
+        for (const auto& [tu, tv] : probes) {
+            const auto dir = test_math::biased_gaze(eye, tu, tv, yaw_bias, pitch_bias, head_yaw);
+            const auto sample = make_sample_with_head_yaw(eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, head_yaw);
+            gaze_screen_point_t point{};
+            const int result = gaze_solve_point(&sample, &calibration, &display, &point);
+            expect_true(result == GAZE_OK, "xlate: solve point");
+            char msg[128];
+            std::snprintf(msg, sizeof(msg),
+                "xlate eye=(%.2f,%.2f,%.2f) target=(%.1f,%.1f): u=%.3f expected=%.2f",
+                eye.x, eye.y, eye.z, tu, tv, point.u, tu);
+            expect_near(point.u, tu, 0.07f, msg);
+            std::snprintf(msg, sizeof(msg),
+                "xlate eye=(%.2f,%.2f,%.2f) target=(%.1f,%.1f): v=%.3f expected=%.2f",
+                eye.x, eye.y, eye.z, tu, tv, point.v, tv);
+            expect_near(point.v, tv, 0.07f, msg);
+        }
+    }
+
+    gaze_cal_free(session);
+}
+
 }  // namespace
 
 int main() {
@@ -258,6 +527,10 @@ int main() {
     test_calibration_blob_round_trip();
     test_runtime_residual_application();
     test_invalid_arguments();
+    test_head_rotation_invariance();
+    test_calibration_mixed_head_poses();
+    test_bias_correction_face_frame_multiple_targets();
+    test_head_translation_large_range();
     std::cout << "core tests passed\n";
     return 0;
 }
