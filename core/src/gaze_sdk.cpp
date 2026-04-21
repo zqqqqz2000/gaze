@@ -17,6 +17,7 @@ constexpr float kMetersPerMillimeter = 0.001f;
 constexpr float kMinDirectionNorm = 1e-6f;
 constexpr float kFiniteDifferenceEps = 1e-4f;
 constexpr float kPlaneParallelEps = 1e-5f;
+constexpr float kResidualFitRegularization = 0.01f;
 constexpr uint8_t kCalibrationMagic[4] = {'G', 'Z', 'C', 'B'};
 constexpr uint32_t kCalibrationEncodingVersion = 1u;
 
@@ -290,19 +291,70 @@ bool intersect_ray_with_screen(
         return false;
     }
     *out_hit = origin + direction * lambda;
-    *out_distance = std::fabs(dot(normal, *out_hit - center));
+    *out_distance = std::fabs(dot(normal, origin - center));
     const float cosine = clamp01(std::fabs(dot(normalized(direction), normal)));
     *out_angle = std::asin(cosine);
     return true;
 }
 
+float compute_head_rotation_diversity_rad(const std::vector<Observation>& observations) {
+    if (observations.size() < 2) {
+        return 0.0f;
+    }
+    const float* q0 = observations[0].sample.head_rot_p_f_q;
+    float mq[4] = {};
+    for (const auto& obs : observations) {
+        const float* q = obs.sample.head_rot_p_f_q;
+        float sign = (q0[0] * q[0] + q0[1] * q[1] + q0[2] * q[2] + q0[3] * q[3]) < 0.0f ? -1.0f : 1.0f;
+        for (int i = 0; i < 4; ++i) {
+            mq[i] += sign * q[i];
+        }
+    }
+    const float inv_n = 1.0f / static_cast<float>(observations.size());
+    for (float& v : mq) {
+        v *= inv_n;
+    }
+    float norm_sq = mq[0] * mq[0] + mq[1] * mq[1] + mq[2] * mq[2] + mq[3] * mq[3];
+    if (norm_sq < 1e-8f) {
+        return 0.0f;
+    }
+    const float inv_norm = 1.0f / std::sqrt(norm_sq);
+    for (float& v : mq) {
+        v *= inv_norm;
+    }
+    float max_angle = 0.0f;
+    for (const auto& obs : observations) {
+        const float* q = obs.sample.head_rot_p_f_q;
+        float d = std::fabs(mq[0] * q[0] + mq[1] * q[1] + mq[2] * q[2] + mq[3] * q[3]);
+        d = std::min(1.0f, d);
+        max_angle = std::max(max_angle, 2.0f * std::acos(d));
+    }
+    return max_angle;
+}
+
+float adaptive_bias_regularization_weight(float diversity_rad) {
+    constexpr float kLowDiversity = 0.05f;
+    constexpr float kHighDiversity = 0.25f;
+    constexpr float kWeightLow = 3.0f;
+    constexpr float kWeightHigh = 0.5f;
+    if (diversity_rad <= kLowDiversity) {
+        return kWeightLow;
+    }
+    if (diversity_rad >= kHighDiversity) {
+        return kWeightHigh;
+    }
+    const float t = (diversity_rad - kLowDiversity) / (kHighDiversity - kLowDiversity);
+    return kWeightLow + t * (kWeightHigh - kWeightLow);
+}
+
 std::vector<float> build_residuals(
     const std::vector<Observation>& observations,
     const gaze_display_desc_t& display,
-    const State& state
+    const State& state,
+    float bias_reg_weight
 ) {
     std::vector<float> residuals;
-    residuals.reserve(observations.size() * 3);
+    residuals.reserve(observations.size() * 3 + 2);
     for (const Observation& observation : observations) {
         const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
         const Vec3 raw_dir = make_vec3(observation.sample.gaze_dir_p);
@@ -316,6 +368,8 @@ std::vector<float> build_residuals(
         residuals.push_back(delta.y);
         residuals.push_back(delta.z);
     }
+    residuals.push_back(state.yaw_bias * bias_reg_weight);
+    residuals.push_back(state.pitch_bias * bias_reg_weight);
     return residuals;
 }
 
@@ -378,7 +432,8 @@ bool gauss_newton_optimize(
     const std::vector<Observation>& observations,
     const gaze_display_desc_t& display,
     State* state,
-    bool optimize_bias
+    bool optimize_bias,
+    float bias_reg_weight
 ) {
     const int parameter_count = optimize_bias ? 8 : 6;
     if (observations.size() < 4) {
@@ -387,7 +442,7 @@ bool gauss_newton_optimize(
 
     float damping = 1e-3f;
     for (int iteration = 0; iteration < 30; ++iteration) {
-        const std::vector<float> residuals = build_residuals(observations, display, *state);
+        const std::vector<float> residuals = build_residuals(observations, display, *state, bias_reg_weight);
         const std::size_t residual_count = residuals.size();
 
         std::vector<float> jacobian(residual_count * static_cast<std::size_t>(parameter_count), 0.0f);
@@ -395,7 +450,7 @@ bool gauss_newton_optimize(
             std::vector<float> delta(parameter_count, 0.0f);
             delta[param] = kFiniteDifferenceEps;
             const State plus_state = apply_delta(*state, delta, optimize_bias);
-            const std::vector<float> plus_residuals = build_residuals(observations, display, plus_state);
+            const std::vector<float> plus_residuals = build_residuals(observations, display, plus_state, bias_reg_weight);
             for (std::size_t row = 0; row < residual_count; ++row) {
                 jacobian[row * static_cast<std::size_t>(parameter_count) + static_cast<std::size_t>(param)] =
                     (plus_residuals[row] - residuals[row]) / kFiniteDifferenceEps;
@@ -435,7 +490,7 @@ bool gauss_newton_optimize(
         }
 
         const State candidate = apply_delta(*state, step, optimize_bias);
-        const std::vector<float> candidate_residuals = build_residuals(observations, display, candidate);
+        const std::vector<float> candidate_residuals = build_residuals(observations, display, candidate, bias_reg_weight);
 
         float current_cost = 0.0f;
         float candidate_cost = 0.0f;
@@ -736,6 +791,100 @@ int gaze_cal_push_sample(
     return GAZE_OK;
 }
 
+void fit_residual_polynomials(
+    const std::vector<Observation>& observations,
+    const gaze_calibration_t& calibration,
+    const gaze_display_desc_t& display,
+    float out_residual_u[6],
+    float out_residual_v[6]
+) {
+    std::fill(out_residual_u, out_residual_u + 6, 0.0f);
+    std::fill(out_residual_v, out_residual_v + 6, 0.0f);
+
+    struct TargetAccum {
+        Vec2 target{};
+        double sum_u = 0.0;
+        double sum_v = 0.0;
+        int count = 0;
+    };
+    std::vector<TargetAccum> targets;
+
+    for (const Observation& obs : observations) {
+        TargetAccum* found = nullptr;
+        for (auto& t : targets) {
+            if (std::fabs(t.target.x - obs.target_uv.x) < 0.01f &&
+                std::fabs(t.target.y - obs.target_uv.y) < 0.01f) {
+                found = &t;
+                break;
+            }
+        }
+        if (!found) {
+            targets.push_back(TargetAccum{obs.target_uv, 0.0, 0.0, 0});
+            found = &targets.back();
+        }
+        gaze_screen_point_t point{};
+        if (gaze_solve_point(&obs.sample, &calibration, &display, &point) == GAZE_OK) {
+            found->sum_u += point.u;
+            found->sum_v += point.v;
+            found->count++;
+        }
+    }
+
+    int valid_count = 0;
+    for (const auto& t : targets) {
+        if (t.count > 0) {
+            ++valid_count;
+        }
+    }
+    if (valid_count < 3) {
+        return;
+    }
+
+    constexpr int kCoeffs = 6;
+    std::vector<float> xt_x(kCoeffs * kCoeffs, 0.0f);
+    std::vector<float> xt_du(kCoeffs, 0.0f);
+    std::vector<float> xt_dv(kCoeffs, 0.0f);
+
+    for (const auto& t : targets) {
+        if (t.count == 0) {
+            continue;
+        }
+        const float mu = static_cast<float>(t.sum_u / t.count);
+        const float mv = static_cast<float>(t.sum_v / t.count);
+        const float du = t.target.x - mu;
+        const float dv = t.target.y - mv;
+        const float row[kCoeffs] = {1.0f, mu, mv, mu * mu, mu * mv, mv * mv};
+        for (int i = 0; i < kCoeffs; ++i) {
+            xt_du[i] += row[i] * du;
+            xt_dv[i] += row[i] * dv;
+            for (int j = 0; j < kCoeffs; ++j) {
+                xt_x[i * kCoeffs + j] += row[i] * row[j];
+            }
+        }
+    }
+
+    for (int i = 0; i < kCoeffs; ++i) {
+        xt_x[i * kCoeffs + i] += kResidualFitRegularization;
+    }
+
+    {
+        auto mat = xt_x;
+        auto rhs = xt_du;
+        std::vector<float> sol;
+        if (solve_linear_system(mat, rhs, kCoeffs, &sol)) {
+            std::copy(sol.begin(), sol.end(), out_residual_u);
+        }
+    }
+    {
+        auto mat = xt_x;
+        auto rhs = xt_dv;
+        std::vector<float> sol;
+        if (solve_linear_system(mat, rhs, kCoeffs, &sol)) {
+            std::copy(sol.begin(), sol.end(), out_residual_v);
+        }
+    }
+}
+
 int gaze_cal_solve(gaze_cal_session_t* session, gaze_calibration_t* out_calibration) {
     if (session == nullptr || out_calibration == nullptr) {
         return GAZE_ERROR_INVALID_ARGUMENT;
@@ -743,14 +892,26 @@ int gaze_cal_solve(gaze_cal_session_t* session, gaze_calibration_t* out_calibrat
     if (session->observations.size() < 6) {
         return GAZE_ERROR_NOT_ENOUGH_DATA;
     }
+
+    const float diversity = compute_head_rotation_diversity_rad(session->observations);
+    const float reg_weight = adaptive_bias_regularization_weight(diversity);
+
     State state = initialize_state(session->observations, session->display);
-    if (!gauss_newton_optimize(session->observations, session->display, &state, true)) {
+    if (!gauss_newton_optimize(session->observations, session->display, &state, true, reg_weight)) {
         return GAZE_ERROR_NUMERIC_FAILURE;
     }
+
     gaze_calibration_t calibration{};
-    fill_calibration(state, session->display, SolveStats{}, static_cast<uint32_t>(session->observations.size()), &calibration);
+    const uint32_t n = static_cast<uint32_t>(session->observations.size());
+    fill_calibration(state, session->display, SolveStats{}, n, &calibration);
+
+    fit_residual_polynomials(session->observations, calibration, session->display,
+                             calibration.residual_u, calibration.residual_v);
+
     const SolveStats stats = compute_solve_stats(session->observations, calibration, session->display);
-    fill_calibration(state, session->display, stats, static_cast<uint32_t>(session->observations.size()), &calibration);
+    calibration.rmse_px = stats.rmse_px;
+    calibration.median_err_px = stats.median_err_px;
+
     *out_calibration = calibration;
     return GAZE_OK;
 }
@@ -860,7 +1021,7 @@ int gaze_refit_pose(
     }
 
     State state = load_state_from_calibration(*base_calibration);
-    if (!gauss_newton_optimize(packed, *display, &state, false)) {
+    if (!gauss_newton_optimize(packed, *display, &state, false, 0.0f)) {
         return GAZE_ERROR_NUMERIC_FAILURE;
     }
     gaze_calibration_t calibration = *base_calibration;

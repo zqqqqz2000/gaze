@@ -119,6 +119,32 @@ public struct GazeCalibration: Sendable {
     public var medianErrorPixels: Float { rawValue.median_err_px }
     public var sampleCount: UInt32 { rawValue.sample_count }
 
+    public var yawBiasRad: Float { rawValue.yaw_bias_rad }
+    public var pitchBiasRad: Float { rawValue.pitch_bias_rad }
+    public var yawGain: Float { rawValue.yaw_gain }
+    public var pitchGain: Float { rawValue.pitch_gain }
+
+    public var screenWidthMM: Float { rawValue.screen_width_mm }
+    public var screenHeightMM: Float { rawValue.screen_height_mm }
+
+    public var transformProviderFromScreen: [Float] {
+        withUnsafeBytes(of: rawValue.T_provider_from_screen) { buf in
+            Array(buf.bindMemory(to: Float.self))
+        }
+    }
+
+    public var residualU: [Float] {
+        withUnsafeBytes(of: rawValue.residual_u) { buf in
+            Array(buf.bindMemory(to: Float.self))
+        }
+    }
+
+    public var residualV: [Float] {
+        withUnsafeBytes(of: rawValue.residual_v) { buf in
+            Array(buf.bindMemory(to: Float.self))
+        }
+    }
+
     fileprivate init(rawValue: gaze_calibration_t) {
         self.rawValue = rawValue
     }
