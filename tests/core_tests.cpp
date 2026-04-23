@@ -997,6 +997,93 @@ void test_refit_preserves_gain() {
     expect_near(refit.pitch_gain, 0.9f, kTolerance, "refit-gain: pitch_gain preserved");
 }
 
+void test_quality_gate_rejects_bad_calibration() {
+    const gaze_display_desc_t display = make_display();
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "quality-gate: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const auto sample = make_sample(0.0f, 0.0f, 0.0f,
+            (static_cast<float>(i) - 4.0f) * 0.01f, 0.0f, 1.0f);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    const int result = gaze_cal_solve(session, &calibration);
+    expect_true(
+        result == GAZE_ERROR_CALIBRATION_QUALITY || result == GAZE_OK,
+        "quality-gate: should return quality error or ok"
+    );
+    if (result == GAZE_ERROR_CALIBRATION_QUALITY) {
+        expect_true(calibration.rmse_px > 0.0f,
+            "quality-gate: calibration data should still be populated on quality failure");
+        expect_true(calibration.sample_count == targets.size(),
+            "quality-gate: sample count should still be populated");
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_dual_optimization_picks_better_orientation() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.03f;
+    const float pitch_bias = -0.02f;
+
+    const test_math::V3 screen_center{-0.15f, -0.1f, 0.55f};
+    const float screen_w_m = 0.6f;
+    const float screen_h_m = 0.34f;
+    const test_math::V3 ax{-1.0f, 0.0f, 0.0f};
+    const test_math::V3 ay{0.0f, 1.0f, 0.0f};
+
+    for (int trial = 0; trial < 3; ++trial) {
+        gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+        expect_true(session != nullptr, "dual-opt: session created");
+
+        const std::vector<std::pair<float, float>> targets{
+            {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+            {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+            {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+        };
+        const float head_yaws[] = {0.2f, 0.0f, -0.15f, 0.1f, 0.0f, -0.1f, 0.12f, -0.05f, -0.25f};
+
+        for (size_t i = 0; i < targets.size(); ++i) {
+            gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+            const test_math::V3 eye{0.0f, 0.0f, 0.0f};
+            const auto target_pt = test_math::screen_point_offset(
+                targets[i].first, targets[i].second, screen_w_m, screen_h_m, screen_center, ax, ay);
+            auto d_true = test_math::normalize(test_math::sub(target_pt, eye));
+            auto d_f = test_math::rot_y(d_true, -head_yaws[i]);
+            d_f = test_math::rot_y(d_f, -yaw_bias);
+            d_f = test_math::rot_x(d_f, -pitch_bias);
+            auto d_biased = test_math::normalize(test_math::rot_y(d_f, head_yaws[i]));
+            const auto sample = make_sample_with_head_yaw(
+                eye.x, eye.y, eye.z, d_biased.x, d_biased.y, d_biased.z, head_yaws[i]);
+            gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+        }
+
+        gaze_calibration_t calibration{};
+        const int solve_result = gaze_cal_solve(session, &calibration);
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "dual-opt trial %d: solve should succeed (result=%d, rmse=%.1f)",
+                      trial, solve_result, calibration.rmse_px);
+        expect_true(solve_result == GAZE_OK, msg);
+        std::snprintf(msg, sizeof(msg), "dual-opt trial %d: rmse=%.1f should be < 100", trial, calibration.rmse_px);
+        expect_true(calibration.rmse_px < 100.0f, msg);
+        std::snprintf(msg, sizeof(msg), "dual-opt trial %d: |yaw_bias|=%.2f° should be < 45°",
+                      trial, std::fabs(calibration.yaw_bias_rad) * 180.0f / 3.14159f);
+        expect_true(std::fabs(calibration.yaw_bias_rad) < 0.785f, msg);
+
+        gaze_cal_free(session);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1021,6 +1108,8 @@ int main() {
     test_many_samples_per_target();
     test_solve_point_gain_effect();
     test_refit_preserves_gain();
+    test_quality_gate_rejects_bad_calibration();
+    test_dual_optimization_picks_better_orientation();
     std::cout << "core tests passed\n";
     return 0;
 }

@@ -52,6 +52,11 @@ struct Observation {
     gaze_provider_sample_t sample{};
 };
 
+struct DistancePrior {
+    Vec3 mean_eye{0.0f, 0.0f, 0.0f};
+    float mean_face_distance = 0.6f;
+};
+
 struct SolveStats {
     float rmse_px = 0.0f;
     float median_err_px = 0.0f;
@@ -358,14 +363,35 @@ float adaptive_bias_regularization_weight(float diversity_rad) {
     return kWeightLow + t * (kWeightHigh - kWeightLow);
 }
 
+DistancePrior compute_distance_prior(const std::vector<Observation>& observations) {
+    DistancePrior prior;
+    if (observations.empty()) return prior;
+    Vec3 sum{0.0f, 0.0f, 0.0f};
+    float sum_fd = 0.0f;
+    for (const auto& obs : observations) {
+        sum = sum + make_vec3(obs.sample.gaze_origin_p_m);
+        sum_fd += obs.sample.face_distance_m;
+    }
+    const float inv_n = 1.0f / static_cast<float>(observations.size());
+    prior.mean_eye = sum * inv_n;
+    prior.mean_face_distance = sum_fd * inv_n;
+    if (prior.mean_face_distance < 0.1f || prior.mean_face_distance > 3.0f) {
+        prior.mean_face_distance = 0.6f;
+    }
+    return prior;
+}
+
+constexpr float kDistanceRegWeight = 5.0f;
+
 std::vector<float> build_residuals(
     const std::vector<Observation>& observations,
     const gaze_display_desc_t& display,
     const State& state,
-    float bias_reg_weight
+    float bias_reg_weight,
+    const DistancePrior& prior
 ) {
     std::vector<float> residuals;
-    residuals.reserve(observations.size() * 3 + 4);
+    residuals.reserve(observations.size() * 3 + 5);
     for (const Observation& observation : observations) {
         const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
         const Vec3 raw_dir = make_vec3(observation.sample.gaze_dir_p);
@@ -386,6 +412,11 @@ std::vector<float> build_residuals(
     constexpr float kGainRegWeight = 0.3f;
     residuals.push_back((state.yaw_gain - 1.0f) * kGainRegWeight);
     residuals.push_back((state.pitch_gain - 1.0f) * kGainRegWeight);
+
+    const Vec3 diff = state.center - prior.mean_eye;
+    const float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
+    residuals.push_back((dist - prior.mean_face_distance) * kDistanceRegWeight);
+
     return residuals;
 }
 
@@ -453,7 +484,8 @@ bool gauss_newton_optimize(
     const gaze_display_desc_t& display,
     State* state,
     bool optimize_bias,
-    float bias_reg_weight
+    float bias_reg_weight,
+    const DistancePrior& prior
 ) {
     const int parameter_count = optimize_bias ? 10 : 6;
     if (observations.size() < 4) {
@@ -462,7 +494,7 @@ bool gauss_newton_optimize(
 
     float damping = 1e-3f;
     for (int iteration = 0; iteration < 30; ++iteration) {
-        const std::vector<float> residuals = build_residuals(observations, display, *state, bias_reg_weight);
+        const std::vector<float> residuals = build_residuals(observations, display, *state, bias_reg_weight, prior);
         const std::size_t residual_count = residuals.size();
 
         std::vector<float> jacobian(residual_count * static_cast<std::size_t>(parameter_count), 0.0f);
@@ -470,7 +502,7 @@ bool gauss_newton_optimize(
             std::vector<float> delta(parameter_count, 0.0f);
             delta[param] = kFiniteDifferenceEps;
             const State plus_state = apply_delta(*state, delta, optimize_bias);
-            const std::vector<float> plus_residuals = build_residuals(observations, display, plus_state, bias_reg_weight);
+            const std::vector<float> plus_residuals = build_residuals(observations, display, plus_state, bias_reg_weight, prior);
             for (std::size_t row = 0; row < residual_count; ++row) {
                 jacobian[row * static_cast<std::size_t>(parameter_count) + static_cast<std::size_t>(param)] =
                     (plus_residuals[row] - residuals[row]) / kFiniteDifferenceEps;
@@ -510,7 +542,7 @@ bool gauss_newton_optimize(
         }
 
         const State candidate = apply_delta(*state, step, optimize_bias);
-        const std::vector<float> candidate_residuals = build_residuals(observations, display, candidate, bias_reg_weight);
+        const std::vector<float> candidate_residuals = build_residuals(observations, display, candidate, bias_reg_weight, prior);
 
         float current_cost = 0.0f;
         float candidate_cost = 0.0f;
@@ -531,60 +563,21 @@ bool gauss_newton_optimize(
     return true;
 }
 
-Vec3 estimate_ray_bundle_intersection(const std::vector<Observation>& observations, Vec2 center_uv) {
-    std::array<float, 9> a{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    std::array<float, 3> b{0.0f, 0.0f, 0.0f};
-    int count = 0;
-    for (const Observation& observation : observations) {
-        const float du = std::fabs(observation.target_uv.x - center_uv.x);
-        const float dv = std::fabs(observation.target_uv.y - center_uv.y);
-        if (du > 0.06f || dv > 0.06f) {
-            continue;
-        }
-        const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
-        const Vec3 d = normalized(make_vec3(observation.sample.gaze_dir_p));
-        const float m00 = 1.0f - d.x * d.x;
-        const float m01 = -d.x * d.y;
-        const float m02 = -d.x * d.z;
-        const float m11 = 1.0f - d.y * d.y;
-        const float m12 = -d.y * d.z;
-        const float m22 = 1.0f - d.z * d.z;
-
-        a[0] += m00;
-        a[1] += m01;
-        a[2] += m02;
-        a[3] += m01;
-        a[4] += m11;
-        a[5] += m12;
-        a[6] += m02;
-        a[7] += m12;
-        a[8] += m22;
-
-        b[0] += m00 * origin.x + m01 * origin.y + m02 * origin.z;
-        b[1] += m01 * origin.x + m11 * origin.y + m12 * origin.z;
-        b[2] += m02 * origin.x + m12 * origin.y + m22 * origin.z;
-        ++count;
+Vec3 estimate_screen_center(const std::vector<Observation>& observations) {
+    Vec3 avg_origin{0.0f, 0.0f, 0.0f};
+    Vec3 avg_dir{0.0f, 0.0f, 0.0f};
+    float avg_fd = 0.0f;
+    const float inv_n = 1.0f / static_cast<float>(std::max(std::size_t(1), observations.size()));
+    for (const Observation& obs : observations) {
+        avg_origin = avg_origin + make_vec3(obs.sample.gaze_origin_p_m);
+        avg_dir = avg_dir + normalized(make_vec3(obs.sample.gaze_dir_p));
+        avg_fd += obs.sample.face_distance_m;
     }
-
-    if (count < 2) {
-        Vec3 avg_origin{0.0f, 0.0f, 0.0f};
-        Vec3 avg_dir{0.0f, 0.0f, 0.0f};
-        for (const Observation& observation : observations) {
-            avg_origin = avg_origin + make_vec3(observation.sample.gaze_origin_p_m);
-            avg_dir = avg_dir + normalized(make_vec3(observation.sample.gaze_dir_p));
-        }
-        avg_origin = avg_origin / static_cast<float>(observations.size());
-        avg_dir = normalized(avg_dir);
-        return avg_origin + avg_dir * 0.6f;
-    }
-
-    std::vector<float> matrix(a.begin(), a.end());
-    std::vector<float> rhs(b.begin(), b.end());
-    std::vector<float> solution;
-    if (!solve_linear_system(matrix, rhs, 3, &solution)) {
-        return Vec3{0.0f, 0.0f, 0.6f};
-    }
-    return Vec3{solution[0], solution[1], solution[2]};
+    avg_origin = avg_origin * inv_n;
+    avg_dir = normalized(avg_dir);
+    avg_fd *= inv_n;
+    if (avg_fd < 0.1f || avg_fd > 3.0f) avg_fd = 0.6f;
+    return avg_origin + avg_dir * avg_fd;
 }
 
 Vec3 estimate_up_from_observations(const std::vector<Observation>& observations, const Vec3& screen_normal) {
@@ -613,28 +606,21 @@ Vec3 estimate_up_from_observations(const std::vector<Observation>& observations,
     return Vec3{0.0f, 1.0f, 0.0f};
 }
 
-State initialize_state(const std::vector<Observation>& observations, const gaze_display_desc_t& display) {
-    (void)display;
-    const Vec2 center_uv{0.5f, 0.5f};
-    const Vec3 center = estimate_ray_bundle_intersection(observations, center_uv);
+constexpr float kCalibrationQualityRmsePxThreshold = 200.0f;
+
+struct StatePair {
+    State primary;
+    State alternate;
+};
+
+StatePair make_dual_initial_states(const std::vector<Observation>& observations, const gaze_display_desc_t& display, const DistancePrior& prior) {
+    const Vec3 center = estimate_screen_center(observations);
 
     Vec3 avg_dir{0.0f, 0.0f, 0.0f};
-    int count = 0;
     for (const Observation& observation : observations) {
-        const float du = std::fabs(observation.target_uv.x - center_uv.x);
-        const float dv = std::fabs(observation.target_uv.y - center_uv.y);
-        if (du <= 0.06f && dv <= 0.06f) {
-            avg_dir = avg_dir + normalized(make_vec3(observation.sample.gaze_dir_p));
-            ++count;
-        }
+        avg_dir = avg_dir + normalized(make_vec3(observation.sample.gaze_dir_p));
     }
-    if (count == 0) {
-        for (const Observation& observation : observations) {
-            avg_dir = avg_dir + normalized(make_vec3(observation.sample.gaze_dir_p));
-            ++count;
-        }
-    }
-    avg_dir = normalized(avg_dir / static_cast<float>(std::max(1, count)));
+    avg_dir = normalized(avg_dir);
 
     const Vec3 up_hint = estimate_up_from_observations(observations, avg_dir);
 
@@ -646,13 +632,23 @@ State initialize_state(const std::vector<Observation>& observations, const gaze_
     s_bwd.center = center;
     s_bwd.rotation = build_basis_from_normal(-1.0f * avg_dir, up_hint);
 
-    const auto r_fwd = build_residuals(observations, display, s_fwd, 0.0f);
-    const auto r_bwd = build_residuals(observations, display, s_bwd, 0.0f);
+    const auto r_fwd = build_residuals(observations, display, s_fwd, 0.0f, prior);
+    const auto r_bwd = build_residuals(observations, display, s_bwd, 0.0f, prior);
     float cost_fwd = 0.0f, cost_bwd = 0.0f;
     for (float v : r_fwd) cost_fwd += v * v;
     for (float v : r_bwd) cost_bwd += v * v;
 
-    return (cost_fwd <= cost_bwd) ? s_fwd : s_bwd;
+    if (cost_fwd <= cost_bwd)
+        return {s_fwd, s_bwd};
+    return {s_bwd, s_fwd};
+}
+
+float direction_cost(const std::vector<Observation>& observations, const gaze_display_desc_t& display, const State& s, const DistancePrior& prior) {
+    const auto r = build_residuals(observations, display, s, 0.0f, prior);
+    const std::size_t dir_count = observations.size() * 3;
+    float c = 0.0f;
+    for (std::size_t i = 0; i < dir_count && i < r.size(); ++i) c += r[i] * r[i];
+    return c;
 }
 
 void store_transform(const State& state, float out[16]) {
@@ -958,10 +954,27 @@ int gaze_cal_solve(gaze_cal_session_t* session, gaze_calibration_t* out_calibrat
 
     const float diversity = compute_head_rotation_diversity_rad(session->observations);
     const float reg_weight = adaptive_bias_regularization_weight(diversity);
+    const DistancePrior prior = compute_distance_prior(session->observations);
 
-    State state = initialize_state(session->observations, session->display);
-    if (!gauss_newton_optimize(session->observations, session->display, &state, true, reg_weight)) {
+    auto [s1, s2] = make_dual_initial_states(session->observations, session->display, prior);
+
+    gauss_newton_optimize(session->observations, session->display, &s1, false, 0.0f, prior);
+    gauss_newton_optimize(session->observations, session->display, &s2, false, 0.0f, prior);
+
+    const bool ok1 = gauss_newton_optimize(session->observations, session->display, &s1, true, reg_weight, prior);
+    const bool ok2 = gauss_newton_optimize(session->observations, session->display, &s2, true, reg_weight, prior);
+
+    if (!ok1 && !ok2) {
         return GAZE_ERROR_NUMERIC_FAILURE;
+    }
+
+    State state;
+    if (ok1 && ok2) {
+        const float c1 = direction_cost(session->observations, session->display, s1, prior);
+        const float c2 = direction_cost(session->observations, session->display, s2, prior);
+        state = (c1 <= c2) ? s1 : s2;
+    } else {
+        state = ok1 ? s1 : s2;
     }
 
     gaze_calibration_t calibration{};
@@ -976,6 +989,10 @@ int gaze_cal_solve(gaze_cal_session_t* session, gaze_calibration_t* out_calibrat
     calibration.median_err_px = stats.median_err_px;
 
     *out_calibration = calibration;
+
+    if (stats.rmse_px > kCalibrationQualityRmsePxThreshold) {
+        return GAZE_ERROR_CALIBRATION_QUALITY;
+    }
     return GAZE_OK;
 }
 
@@ -1084,7 +1101,8 @@ int gaze_refit_pose(
     }
 
     State state = load_state_from_calibration(*base_calibration);
-    if (!gauss_newton_optimize(packed, *display, &state, false, 0.0f)) {
+    const DistancePrior refit_prior = compute_distance_prior(packed);
+    if (!gauss_newton_optimize(packed, *display, &state, false, 0.0f, refit_prior)) {
         return GAZE_ERROR_NUMERIC_FAILURE;
     }
     gaze_calibration_t calibration = *base_calibration;

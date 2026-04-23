@@ -63,9 +63,9 @@ struct CalibrationCollector {
 
 enum CalibrationGrid {
     static let targets: [CGPoint] = [
-        CGPoint(x: 0.15, y: 0.18), CGPoint(x: 0.50, y: 0.18), CGPoint(x: 0.85, y: 0.18),
-        CGPoint(x: 0.15, y: 0.50), CGPoint(x: 0.50, y: 0.50), CGPoint(x: 0.85, y: 0.50),
-        CGPoint(x: 0.15, y: 0.82), CGPoint(x: 0.50, y: 0.82), CGPoint(x: 0.85, y: 0.82),
+        CGPoint(x: 0.10, y: 0.10), CGPoint(x: 0.50, y: 0.10), CGPoint(x: 0.90, y: 0.10),
+        CGPoint(x: 0.10, y: 0.50), CGPoint(x: 0.50, y: 0.50), CGPoint(x: 0.90, y: 0.50),
+        CGPoint(x: 0.10, y: 0.90), CGPoint(x: 0.50, y: 0.90), CGPoint(x: 0.90, y: 0.90),
     ]
 }
 

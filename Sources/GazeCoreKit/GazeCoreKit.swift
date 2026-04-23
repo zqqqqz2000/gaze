@@ -9,6 +9,7 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
     case outOfRange
     case bufferTooSmall
     case badEncoding
+    case calibrationQuality
     case unknown(code: Int32)
 
     init(code: Int32) {
@@ -25,6 +26,8 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
             self = .bufferTooSmall
         case Int32(GAZE_ERROR_BAD_ENCODING):
             self = .badEncoding
+        case Int32(GAZE_ERROR_CALIBRATION_QUALITY):
+            self = .calibrationQuality
         default:
             self = .unknown(code: code)
         }
@@ -44,6 +47,8 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
             return "Calibration buffer is too small"
         case .badEncoding:
             return "Calibration payload is not decodable"
+        case .calibrationQuality:
+            return "Calibration quality too low; please retry"
         case .unknown(let code):
             return "Unknown gaze core error: \(code)"
         }
@@ -222,6 +227,23 @@ public final class GazeCalibrationSession {
             throw GazeCoreError(code: result)
         }
         return GazeCalibration(rawValue: calibration)
+    }
+
+    public struct CalibrationResult: Sendable {
+        public let calibration: GazeCalibration
+        public let qualityAcceptable: Bool
+    }
+
+    public func solveWithQualityCheck() throws -> CalibrationResult {
+        var calibration = gaze_calibration_t()
+        let result = gaze_cal_solve(rawSession, &calibration)
+        if result == GAZE_OK {
+            return CalibrationResult(calibration: GazeCalibration(rawValue: calibration), qualityAcceptable: true)
+        }
+        if result == Int32(GAZE_ERROR_CALIBRATION_QUALITY) {
+            return CalibrationResult(calibration: GazeCalibration(rawValue: calibration), qualityAcceptable: false)
+        }
+        throw GazeCoreError(code: result)
     }
 }
 

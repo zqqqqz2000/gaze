@@ -259,6 +259,7 @@ final class BeamHostViewModel: ObservableObject {
         if sampleCount == 1 || sampleCount.isMultiple(of: 300) {
             logPeriodicSampleDiagnostic(sample: sample, mapped: mappedPoint)
         }
+        logDiagnosticSampleIfActive(sample: sample, mapped: mappedPoint)
         detectPositionJump(mappedPoint.point)
     }
 
@@ -267,6 +268,29 @@ final class BeamHostViewModel: ObservableObject {
     private let gazeFilterX = OneEuroFilter(minCutoff: 1.5, beta: 0.5, dCutoff: 1.0)
     private let gazeFilterY = OneEuroFilter(minCutoff: 1.5, beta: 0.5, dCutoff: 1.0)
     private var lastFilteredTime: CFTimeInterval = 0
+    private var diagStartTime: CFTimeInterval = 0
+    private var diagEndTime: CFTimeInterval = 0
+    private var lastDiagLogTime: CFTimeInterval = 0
+
+    private func logDiagnosticSampleIfActive(sample: ProviderSamplePayload, mapped: MappedPoint) {
+        let now = CACurrentMediaTime()
+        guard diagEndTime > 0 else { return }
+        if now >= diagEndTime {
+            appendLog("=== HEAD-SWEEP DIAGNOSTIC END ===")
+            diagEndTime = 0
+            return
+        }
+        guard now - lastDiagLogTime >= 0.5 else { return }
+        lastDiagLogTime = now
+        let h = sample.headPosPM
+        let r = sample.headRotPFQ
+        appendLog("DIAG t=\(String(format: "%.1f", now - diagStartTime))s "
+            + "hPos=(\(h.map { String(format: "%.3f", $0) }.joined(separator: ","))) "
+            + "hRot=(\(r.map { String(format: "%.3f", $0) }.joined(separator: ","))) "
+            + "-> \(mapped.debugDescription) "
+            + "conf=\(String(format: "%.2f", sample.confidence)) "
+            + "fd=\(String(format: "%.3f", sample.faceDistanceM))m")
+    }
 
     private func logPeriodicSampleDiagnostic(sample: ProviderSamplePayload, mapped: MappedPoint) {
         let o = sample.gazeOriginPM
@@ -458,11 +482,8 @@ final class BeamHostViewModel: ObservableObject {
         logPointConsistency(pointDigests)
 
         do {
-            let solvedCalibration = try calibrationSession.solve()
-            calibration = solvedCalibration
-            calibrationStatus = "calibration complete"
-            calibrationDetail = calibrationSummary(for: solvedCalibration)
-            try calibrationPersistence.save(solvedCalibration)
+            let result = try calibrationSession.solveWithQualityCheck()
+            let solvedCalibration = result.calibration
 
             appendLog("=== CALIBRATION RESULT ===")
             appendLog("rmse=\(String(format: "%.2f", solvedCalibration.rmsePixels)) px, "
@@ -498,6 +519,23 @@ final class BeamHostViewModel: ObservableObject {
             let avgFD = pointDigests.reduce(Float(0)) { $0 + $1.meanFaceDistance } / max(1, Float(pointDigests.count))
             calibrationMeanFaceDistance = avgFD
             appendLog("calibration mean faceDistance=\(String(format: "%.3f", avgFD))m")
+
+            if result.qualityAcceptable {
+                calibration = solvedCalibration
+                calibrationStatus = "calibration complete"
+                calibrationDetail = calibrationSummary(for: solvedCalibration)
+                try calibrationPersistence.save(solvedCalibration)
+                diagStartTime = CACurrentMediaTime()
+                diagEndTime = diagStartTime + 45
+                lastDiagLogTime = 0
+                appendLog("=== HEAD-SWEEP DIAGNOSTIC BEGIN (45s) ===")
+                appendLog("Look at screen center → rotate head → move head")
+            } else {
+                calibration = nil
+                calibrationStatus = "calibration quality too low"
+                calibrationDetail = "RMSE \(String(format: "%.0f", solvedCalibration.rmsePixels))px — please retry with stable head and fixation"
+                appendLog("⚠ CALIBRATION REJECTED: quality too low (RMSE=\(String(format: "%.1f", solvedCalibration.rmsePixels))px)")
+            }
 
             if solvedCalibration.rmsePixels > 120 {
                 appendLog("WARNING: high rmse; check fixation stability and screen metrics")

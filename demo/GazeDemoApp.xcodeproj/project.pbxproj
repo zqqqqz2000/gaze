@@ -50,7 +50,7 @@
 		CCB1F3B7C236848DE6C6FB12 /* HostFileLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostFileLogger.swift; sourceTree = "<group>"; };
 		D1248F03774C0F7EED5249BD /* BeamOverlayModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeamOverlayModel.swift; sourceTree = "<group>"; };
 		E5E1471B64801B7CBAD3997F /* gaze */ = {isa = PBXFileReference; lastKnownFileType = folder; name = gaze; path = ..; sourceTree = SOURCE_ROOT; };
-		E952E669DC20991B29BC7C97 /* GazeDemoApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GazeDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E952E669DC20991B29BC7C97 /* GazeDemoApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GazeDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -189,7 +189,6 @@
 						ProvisioningStyle = Automatic;
 					};
 					602E86E54F8EAA27B1E84458 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -279,7 +278,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GazeDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -302,7 +301,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = V2BSDS6VU4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GazeDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
