@@ -274,7 +274,38 @@ Vec3 direction_from_tangent(float yaw, float pitch) {
     return Vec3{std::sin(yaw) * cp, -sp, std::cos(yaw) * cp};
 }
 
+// Fast path for G = identity: avoids atan2 and asin by using the sum-of-angles
+// identities on (sin yaw, cos yaw, sin pitch, cos pitch) computed directly from
+// the direction components. Mathematically equivalent to the generic path when
+// G == I, but replaces two transcendentals with one sqrt + a few MADDs.
+Vec3 apply_identity_G_bias(const Vec3& d_face, float b_yaw, float b_pitch) {
+    const Vec3 n = normalized(d_face);
+    constexpr float kEps = 1e-6f;
+    const float y_clamped = std::max(-1.0f + kEps, std::min(1.0f - kEps, n.y));
+    const float horiz = std::sqrt(std::max(0.0f, 1.0f - y_clamped * y_clamped));
+    const float sy = (horiz > kEps) ? n.x / horiz : 0.0f;
+    const float cy = (horiz > kEps) ? n.z / horiz : 1.0f;
+    const float sp0 = -y_clamped;
+    const float cp0 = horiz;
+    const float sby = std::sin(b_yaw);
+    const float cby = std::cos(b_yaw);
+    const float sbp = std::sin(b_pitch);
+    const float cbp = std::cos(b_pitch);
+    const float new_sy = sy * cby + cy * sby;
+    const float new_cy = cy * cby - sy * sby;
+    const float new_sp = sp0 * cbp + cp0 * sbp;
+    const float new_cp = cp0 * cbp - sp0 * sbp;
+    return Vec3{new_sy * new_cp, -new_sp, new_cy * new_cp};
+}
+
+inline bool is_identity_G(const TangentAffine& T) {
+    return T.G_yy == 1.0f && T.G_pp == 1.0f && T.G_yp == 0.0f && T.G_py == 0.0f;
+}
+
 Vec3 apply_tangent_affine(const Vec3& d_face, const TangentAffine& T) {
+    if (is_identity_G(T)) {
+        return apply_identity_G_bias(d_face, T.b_yaw, T.b_pitch);
+    }
     const Vec2 raw = tangent_from_direction(d_face);
     const float yaw_c = T.G_yy * raw.x + T.G_yp * raw.y + T.b_yaw;
     const float pitch_c = T.G_py * raw.x + T.G_pp * raw.y + T.b_pitch;
