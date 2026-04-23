@@ -43,6 +43,8 @@ struct State {
     Vec3 center;
     float yaw_bias = 0.0f;
     float pitch_bias = 0.0f;
+    float yaw_gain = 1.0f;
+    float pitch_gain = 1.0f;
 };
 
 struct Observation {
@@ -188,13 +190,14 @@ Mat3 rotation_from_axis_angle(const Vec3& axis_angle) {
     return add(add(identity_mat3(), scale(k, std::sin(angle))), scale(kk, 1.0f - std::cos(angle)));
 }
 
-Mat3 build_basis_from_normal(Vec3 z_axis) {
+Mat3 build_basis_from_normal(Vec3 z_axis, Vec3 up_hint = Vec3{0.0f, 1.0f, 0.0f}) {
     z_axis = normalized(z_axis);
-    Vec3 up{0.0f, 1.0f, 0.0f};
-    Vec3 x_axis = cross(up, z_axis);
+    Vec3 x_axis = cross(up_hint, z_axis);
     if (norm(x_axis) < 1e-4f) {
-        up = Vec3{0.0f, 0.0f, 1.0f};
-        x_axis = cross(up, z_axis);
+        Vec3 fallback = (std::fabs(up_hint.y) > 0.9f)
+            ? Vec3{0.0f, 0.0f, 1.0f}
+            : Vec3{0.0f, 1.0f, 0.0f};
+        x_axis = cross(fallback, z_axis);
     }
     x_axis = normalized(x_axis);
     const Vec3 y_axis = normalized(cross(z_axis, x_axis));
@@ -236,10 +239,18 @@ Mat3 head_rotation_from_sample(const gaze_provider_sample_t& sample) {
     return mat3_from_quaternion(qx * inv_norm, qy * inv_norm, qz * inv_norm, qw * inv_norm);
 }
 
-Vec3 bias_correct_direction(const Vec3& direction, float yaw_bias, float pitch_bias, const Mat3& R_provider_from_face) {
+Vec3 bias_correct_direction(
+    const Vec3& direction,
+    float yaw_bias, float pitch_bias,
+    float yaw_gain, float pitch_gain,
+    const Mat3& R_provider_from_face
+) {
     const Mat3 R_face_from_provider = transpose(R_provider_from_face);
     const Vec3 dir_face = mul(R_face_from_provider, normalized(direction));
-    const Vec3 corrected = mul(mul(rotation_y(yaw_bias), rotation_x(pitch_bias)), dir_face);
+
+    const float effective_yaw = yaw_bias * yaw_gain;
+    const float effective_pitch = pitch_bias * pitch_gain;
+    const Vec3 corrected = mul(mul(rotation_y(effective_yaw), rotation_x(effective_pitch)), dir_face);
     return normalized(mul(R_provider_from_face, corrected));
 }
 
@@ -354,12 +365,14 @@ std::vector<float> build_residuals(
     float bias_reg_weight
 ) {
     std::vector<float> residuals;
-    residuals.reserve(observations.size() * 3 + 2);
+    residuals.reserve(observations.size() * 3 + 4);
     for (const Observation& observation : observations) {
         const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
         const Vec3 raw_dir = make_vec3(observation.sample.gaze_dir_p);
         const Mat3 R_pf = head_rotation_from_sample(observation.sample);
-        const Vec3 corrected_dir = bias_correct_direction(raw_dir, state.yaw_bias, state.pitch_bias, R_pf);
+        const Vec3 corrected_dir = bias_correct_direction(
+            raw_dir, state.yaw_bias, state.pitch_bias,
+            state.yaw_gain, state.pitch_gain, R_pf);
         const Vec3 target = screen_point_to_provider(display, state.rotation, state.center, observation.target_uv);
         const Vec3 expected_dir = normalized(target - origin);
         const float weight = std::max(0.2f, observation.sample.confidence);
@@ -370,6 +383,9 @@ std::vector<float> build_residuals(
     }
     residuals.push_back(state.yaw_bias * bias_reg_weight);
     residuals.push_back(state.pitch_bias * bias_reg_weight);
+    constexpr float kGainRegWeight = 0.3f;
+    residuals.push_back((state.yaw_gain - 1.0f) * kGainRegWeight);
+    residuals.push_back((state.pitch_gain - 1.0f) * kGainRegWeight);
     return residuals;
 }
 
@@ -381,6 +397,10 @@ State apply_delta(const State& state, const std::vector<float>& delta, bool incl
     if (include_bias) {
         next.yaw_bias += delta[6];
         next.pitch_bias += delta[7];
+        if (delta.size() > 8) {
+            next.yaw_gain += delta[8];
+            next.pitch_gain += delta[9];
+        }
     }
     return next;
 }
@@ -435,7 +455,7 @@ bool gauss_newton_optimize(
     bool optimize_bias,
     float bias_reg_weight
 ) {
-    const int parameter_count = optimize_bias ? 8 : 6;
+    const int parameter_count = optimize_bias ? 10 : 6;
     if (observations.size() < 4) {
         return false;
     }
@@ -567,10 +587,37 @@ Vec3 estimate_ray_bundle_intersection(const std::vector<Observation>& observatio
     return Vec3{solution[0], solution[1], solution[2]};
 }
 
+Vec3 estimate_up_from_observations(const std::vector<Observation>& observations, const Vec3& screen_normal) {
+    Vec3 sum_delta{0.0f, 0.0f, 0.0f};
+    int count = 0;
+    for (const auto& obs : observations) {
+        if (obs.target_uv.y < 0.35f) {
+            for (const auto& other : observations) {
+                if (other.target_uv.y > 0.65f &&
+                    std::fabs(obs.target_uv.x - other.target_uv.x) < 0.1f) {
+                    const Vec3 d_top = normalized(make_vec3(obs.sample.gaze_dir_p));
+                    const Vec3 d_bot = normalized(make_vec3(other.sample.gaze_dir_p));
+                    sum_delta = sum_delta + (d_top - d_bot);
+                    ++count;
+                }
+            }
+        }
+    }
+    if (count > 0) {
+        Vec3 up_candidate = normalized(sum_delta);
+        Vec3 up_on_plane = up_candidate - screen_normal * dot(up_candidate, screen_normal);
+        if (norm(up_on_plane) > 1e-4f) {
+            return normalized(up_on_plane);
+        }
+    }
+    return Vec3{0.0f, 1.0f, 0.0f};
+}
+
 State initialize_state(const std::vector<Observation>& observations, const gaze_display_desc_t& display) {
     (void)display;
     const Vec2 center_uv{0.5f, 0.5f};
     const Vec3 center = estimate_ray_bundle_intersection(observations, center_uv);
+
     Vec3 avg_dir{0.0f, 0.0f, 0.0f};
     int count = 0;
     for (const Observation& observation : observations) {
@@ -588,9 +635,13 @@ State initialize_state(const std::vector<Observation>& observations, const gaze_
         }
     }
     avg_dir = normalized(avg_dir / static_cast<float>(std::max(1, count)));
+
+    const Vec3 screen_normal = -1.0f * avg_dir;
+    const Vec3 up_hint = estimate_up_from_observations(observations, screen_normal);
+
     State state;
     state.center = center;
-    state.rotation = build_basis_from_normal(-1.0f * avg_dir);
+    state.rotation = build_basis_from_normal(screen_normal, up_hint);
     return state;
 }
 
@@ -679,6 +730,8 @@ State load_state_from_calibration(const gaze_calibration_t& calibration) {
         },
         calibration.yaw_bias_rad,
         calibration.pitch_bias_rad,
+        calibration.yaw_gain,
+        calibration.pitch_gain,
     };
 }
 
@@ -695,8 +748,8 @@ void fill_calibration(
     store_transform(state, out_calibration->T_provider_from_screen);
     out_calibration->yaw_bias_rad = state.yaw_bias;
     out_calibration->pitch_bias_rad = state.pitch_bias;
-    out_calibration->yaw_gain = 1.0f;
-    out_calibration->pitch_gain = 1.0f;
+    out_calibration->yaw_gain = state.yaw_gain;
+    out_calibration->pitch_gain = state.pitch_gain;
     std::fill(std::begin(out_calibration->residual_u), std::end(out_calibration->residual_u), 0.0f);
     std::fill(std::begin(out_calibration->residual_v), std::end(out_calibration->residual_v), 0.0f);
     out_calibration->rmse_px = stats.rmse_px;
@@ -934,8 +987,8 @@ int gaze_solve_point(
     const Mat3 R_pf = head_rotation_from_sample(*sample);
     const Vec3 direction = bias_correct_direction(
         raw_dir,
-        calibration->yaw_bias_rad * calibration->yaw_gain,
-        calibration->pitch_bias_rad * calibration->pitch_gain,
+        calibration->yaw_bias_rad, calibration->pitch_bias_rad,
+        calibration->yaw_gain, calibration->pitch_gain,
         R_pf
     );
 

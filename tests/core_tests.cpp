@@ -517,6 +517,413 @@ void test_head_translation_large_range() {
     gaze_cal_free(session);
 }
 
+namespace test_math {
+
+V3 screen_point_offset(float u, float v, float screen_w_m, float screen_h_m, V3 center, V3 ax, V3 ay) {
+    float sx = (u - 0.5f) * screen_w_m;
+    float sy = (0.5f - v) * screen_h_m;
+    return {center.x + ax.x * sx + ay.x * sy,
+            center.y + ax.y * sx + ay.y * sy,
+            center.z + ax.z * sx + ay.z * sy};
+}
+
+}  // namespace test_math (extension)
+
+void test_calibration_phone_on_left() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.03f;
+    const float pitch_bias = -0.015f;
+
+    const test_math::V3 screen_center{0.15f, -0.1f, 0.55f};
+    const float screen_w_m = 0.6f;
+    const float screen_h_m = 0.34f;
+    const test_math::V3 ax{-1.0f, 0.0f, 0.0f};
+    const test_math::V3 ay{0.0f, 1.0f, 0.0f};
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "phone-left: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float head_yaws[] = {-0.15f, 0.0f, 0.2f, -0.1f, 0.0f, 0.15f, -0.12f, 0.05f, 0.25f};
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        expect_true(
+            gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i)) == GAZE_OK,
+            "phone-left: push target"
+        );
+        const test_math::V3 eye{0.0f, 0.0f, 0.0f};
+        const auto target_pt = test_math::screen_point_offset(
+            targets[i].first, targets[i].second, screen_w_m, screen_h_m, screen_center, ax, ay);
+        auto d_true = test_math::normalize(test_math::sub(target_pt, eye));
+        auto d_f = test_math::rot_y(d_true, -head_yaws[i]);
+        d_f = test_math::rot_y(d_f, -yaw_bias);
+        d_f = test_math::rot_x(d_f, -pitch_bias);
+        auto d_biased = test_math::normalize(test_math::rot_y(d_f, head_yaws[i]));
+
+        const auto sample = make_sample_with_head_yaw(
+            eye.x, eye.y, eye.z, d_biased.x, d_biased.y, d_biased.z, head_yaws[i]);
+        expect_true(gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i)) == GAZE_OK,
+            "phone-left: push sample");
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "phone-left: solve");
+    expect_true(calibration.rmse_px < 80.0f, "phone-left: rmse should be reasonable");
+
+    {
+        const float test_yaw = 0.3f;
+        const test_math::V3 test_eye{0.05f, 0.0f, 0.0f};
+        const auto target_pt = test_math::screen_point_offset(0.5f, 0.5f, screen_w_m, screen_h_m, screen_center, ax, ay);
+        auto d_true = test_math::normalize(test_math::sub(target_pt, test_eye));
+        auto d_f = test_math::rot_y(d_true, -test_yaw);
+        d_f = test_math::rot_y(d_f, -yaw_bias);
+        d_f = test_math::rot_x(d_f, -pitch_bias);
+        auto d_biased = test_math::normalize(test_math::rot_y(d_f, test_yaw));
+
+        const auto sample = make_sample_with_head_yaw(
+            test_eye.x, test_eye.y, test_eye.z, d_biased.x, d_biased.y, d_biased.z, test_yaw);
+        gaze_screen_point_t point{};
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "phone-left: runtime solve");
+        expect_near(point.u, 0.5f, 0.08f, "phone-left: center u");
+        expect_near(point.v, 0.5f, 0.08f, "phone-left: center v");
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_calibration_phone_horizontal() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.02f;
+    const float pitch_bias = -0.01f;
+
+    const test_math::V3 screen_center{0.0f, -0.25f, 0.5f};
+    const float screen_w_m = 0.6f;
+    const float screen_h_m = 0.34f;
+    const test_math::V3 ax{-1.0f, 0.0f, 0.0f};
+    const test_math::V3 ay{0.0f, 1.0f, 0.0f};
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "phone-horiz: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    const float pitch_q = 0.15f;
+    const float qx = std::sin(pitch_q * 0.5f);
+    const float qw = std::cos(pitch_q * 0.5f);
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        expect_true(
+            gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i)) == GAZE_OK,
+            "phone-horiz: push target"
+        );
+        const test_math::V3 eye{0.0f, 0.12f, 0.0f};
+        const auto target_pt = test_math::screen_point_offset(
+            targets[i].first, targets[i].second, screen_w_m, screen_h_m, screen_center, ax, ay);
+        auto d_true = test_math::normalize(test_math::sub(target_pt, eye));
+        auto d_f = test_math::rot_x(d_true, -pitch_q);
+        d_f = test_math::rot_y(d_f, -yaw_bias);
+        d_f = test_math::rot_x(d_f, -pitch_bias);
+        auto d_biased = test_math::normalize(test_math::rot_x(d_f, pitch_q));
+
+        auto sample = make_sample(eye.x, eye.y, eye.z, d_biased.x, d_biased.y, d_biased.z);
+        sample.head_rot_p_f_q[0] = qx;
+        sample.head_rot_p_f_q[1] = 0.0f;
+        sample.head_rot_p_f_q[2] = 0.0f;
+        sample.head_rot_p_f_q[3] = qw;
+        expect_true(gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i)) == GAZE_OK,
+            "phone-horiz: push sample");
+    }
+
+    gaze_calibration_t calibration{};
+    const int solve_result = gaze_cal_solve(session, &calibration);
+    expect_true(solve_result == GAZE_OK, "phone-horiz: solve should succeed");
+
+    const float T_center_dist = std::sqrt(
+        calibration.T_provider_from_screen[12] * calibration.T_provider_from_screen[12] +
+        calibration.T_provider_from_screen[13] * calibration.T_provider_from_screen[13] +
+        calibration.T_provider_from_screen[14] * calibration.T_provider_from_screen[14]
+    );
+    expect_true(T_center_dist < 3.0f, "phone-horiz: screen center should be reasonable distance (<3m)");
+    expect_true(calibration.rmse_px < 120.0f, "phone-horiz: rmse should converge");
+
+    gaze_cal_free(session);
+}
+
+void test_gain_optimization() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.05f;
+    const float pitch_bias = -0.03f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "gain: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float head_yaws[] = {0.0f, 0.2f, -0.15f, -0.25f, 0.0f, 0.3f, 0.15f, -0.2f, 0.35f};
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const auto dir = test_math::biased_gaze(
+            {0, 0, 0}, targets[i].first, targets[i].second, yaw_bias, pitch_bias, head_yaws[i]);
+        const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, head_yaws[i]);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "gain: solve");
+
+    expect_true(std::isfinite(calibration.yaw_gain), "gain: yaw_gain should be finite");
+    expect_true(std::isfinite(calibration.pitch_gain), "gain: pitch_gain should be finite");
+    expect_true(calibration.yaw_gain > 0.3f && calibration.yaw_gain < 3.0f,
+        "gain: yaw_gain should be in reasonable range");
+    expect_true(calibration.pitch_gain > 0.3f && calibration.pitch_gain < 3.0f,
+        "gain: pitch_gain should be in reasonable range");
+
+    const float test_yaw = 0.45f;
+    const test_math::V3 test_eye{0.12f, 0.02f, 0.04f};
+    const std::vector<std::pair<float, float>> probes{
+        {0.2f, 0.2f}, {0.8f, 0.2f}, {0.5f, 0.5f}, {0.2f, 0.8f}, {0.8f, 0.8f},
+    };
+    for (const auto& [tu, tv] : probes) {
+        const auto dir = test_math::biased_gaze(test_eye, tu, tv, yaw_bias, pitch_bias, test_yaw);
+        const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
+        gaze_screen_point_t point{};
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "gain: solve point");
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "gain u: actual=%.3f expected=%.2f", point.u, tu);
+        expect_near(point.u, tu, 0.08f, msg);
+        std::snprintf(msg, sizeof(msg), "gain v: actual=%.3f expected=%.2f", point.v, tv);
+        expect_near(point.v, tv, 0.08f, msg);
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_initialization_with_tilted_screen() {
+    const gaze_display_desc_t display = make_display();
+
+    const test_math::V3 screen_center{0.0f, 0.0f, 0.65f};
+    const float tilt_angle = 0.3f;
+    const float ct = std::cos(tilt_angle);
+    const float st = std::sin(tilt_angle);
+    const test_math::V3 ax{-1.0f, 0.0f, 0.0f};
+    const test_math::V3 ay{0.0f, ct, -st};
+    const float screen_w_m = 0.6f;
+    const float screen_h_m = 0.34f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "tilt: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const test_math::V3 eye{0.0f, 0.0f, 0.0f};
+        const auto target_pt = test_math::screen_point_offset(
+            targets[i].first, targets[i].second, screen_w_m, screen_h_m, screen_center, ax, ay);
+        auto d_true = test_math::normalize(test_math::sub(target_pt, eye));
+        auto sample = make_sample(eye.x, eye.y, eye.z, d_true.x, d_true.y, d_true.z);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "tilt: solve");
+    expect_true(calibration.rmse_px < 40.0f, "tilt: rmse should be very low for unbiased data");
+
+    const test_math::V3 probe_eye{0.1f, 0.05f, 0.0f};
+    const auto target_pt = test_math::screen_point_offset(0.5f, 0.5f, screen_w_m, screen_h_m, screen_center, ax, ay);
+    auto probe_dir = test_math::normalize(test_math::sub(target_pt, probe_eye));
+    auto sample = make_sample(probe_eye.x, probe_eye.y, probe_eye.z, probe_dir.x, probe_dir.y, probe_dir.z);
+    gaze_screen_point_t point{};
+    expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "tilt: runtime solve");
+    expect_near(point.u, 0.5f, 0.06f, "tilt: center u");
+    expect_near(point.v, 0.5f, 0.06f, "tilt: center v");
+
+    gaze_cal_free(session);
+}
+
+void test_blob_round_trip_with_gain() {
+    gaze_calibration_t calibration = make_front_calibration();
+    calibration.yaw_bias_rad = 0.03f;
+    calibration.pitch_bias_rad = -0.02f;
+    calibration.yaw_gain = 1.15f;
+    calibration.pitch_gain = 0.85f;
+    calibration.rmse_px = 15.0f;
+    calibration.median_err_px = 11.0f;
+    calibration.sample_count = 90u;
+
+    std::vector<unsigned char> blob(gaze_calibration_blob_size());
+    expect_true(
+        gaze_calibration_serialize(&calibration, blob.data(), blob.size()) == GAZE_OK,
+        "gain blob: serialize"
+    );
+
+    gaze_calibration_t decoded{};
+    expect_true(
+        gaze_calibration_deserialize(blob.data(), blob.size(), &decoded) == GAZE_OK,
+        "gain blob: deserialize"
+    );
+    expect_near(decoded.yaw_gain, 1.15f, kTolerance, "gain blob: yaw_gain");
+    expect_near(decoded.pitch_gain, 0.85f, kTolerance, "gain blob: pitch_gain");
+    expect_near(decoded.yaw_bias_rad, 0.03f, kTolerance, "gain blob: yaw_bias");
+    expect_near(decoded.pitch_bias_rad, -0.02f, kTolerance, "gain blob: pitch_bias");
+}
+
+void test_calibration_with_extreme_head_yaw() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.04f;
+    const float pitch_bias = -0.02f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "extreme-yaw: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float head_yaws[] = {-0.3f, 0.0f, 0.35f, -0.25f, 0.1f, 0.4f, -0.2f, 0.15f, 0.45f};
+    const test_math::V3 eyes[] = {
+        {-0.08f, 0, 0}, {0, 0, 0}, {0.1f, 0, 0},
+        {-0.06f, 0, 0}, {0.02f, 0, 0}, {0.12f, 0.01f, 0},
+        {-0.04f, -0.01f, 0}, {0.03f, 0, 0}, {0.14f, 0.01f, 0.02f},
+    };
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        const auto dir = test_math::biased_gaze(eyes[i], targets[i].first, targets[i].second, yaw_bias, pitch_bias, head_yaws[i]);
+        const auto sample = make_sample_with_head_yaw(eyes[i].x, eyes[i].y, eyes[i].z, dir.x, dir.y, dir.z, head_yaws[i]);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "extreme-yaw: solve");
+
+    const float extreme_yaw = 0.6f;
+    const test_math::V3 test_eye{0.15f, 0.0f, 0.03f};
+    const std::vector<std::pair<float, float>> probes{
+        {0.2f, 0.2f}, {0.5f, 0.5f}, {0.8f, 0.8f},
+    };
+    for (const auto& [tu, tv] : probes) {
+        const auto dir = test_math::biased_gaze(test_eye, tu, tv, yaw_bias, pitch_bias, extreme_yaw);
+        const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, extreme_yaw);
+        gaze_screen_point_t point{};
+        const int result = gaze_solve_point(&sample, &calibration, &display, &point);
+        expect_true(result == GAZE_OK, "extreme-yaw: solve point");
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "extreme-yaw u: actual=%.3f expected=%.2f", point.u, tu);
+        expect_near(point.u, tu, 0.09f, msg);
+        std::snprintf(msg, sizeof(msg), "extreme-yaw v: actual=%.3f expected=%.2f", point.v, tv);
+        expect_near(point.v, tv, 0.09f, msg);
+    }
+
+    gaze_cal_free(session);
+}
+
+void test_many_samples_per_target() {
+    const gaze_display_desc_t display = make_display();
+    const float yaw_bias = 0.03f;
+    const float pitch_bias = -0.015f;
+
+    gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
+    expect_true(session != nullptr, "multi-sample: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float noise_dirs[][2] = {{0.002f, -0.001f}, {-0.001f, 0.002f}, {0.001f, 0.001f}};
+    const float head_yaws[] = {0.0f, 0.1f, -0.08f};
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+        for (int j = 0; j < 3; ++j) {
+            auto dir = test_math::biased_gaze({0, 0, 0}, targets[i].first, targets[i].second,
+                yaw_bias, pitch_bias, head_yaws[j]);
+            dir.x += noise_dirs[j][0];
+            dir.y += noise_dirs[j][1];
+            dir = test_math::normalize(dir);
+            const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, head_yaws[j]);
+            gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+        }
+    }
+
+    gaze_calibration_t calibration{};
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "multi-sample: solve");
+    expect_true(calibration.sample_count == 27, "multi-sample: sample count");
+    expect_true(calibration.rmse_px < 80.0f, "multi-sample: rmse");
+
+    const auto dir = test_math::biased_gaze({0, 0, 0}, 0.5f, 0.5f, yaw_bias, pitch_bias, 0.0f);
+    const auto sample = make_sample_with_head_yaw(0, 0, 0, dir.x, dir.y, dir.z, 0.0f);
+    gaze_screen_point_t point{};
+    expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "multi-sample: runtime");
+    expect_near(point.u, 0.5f, 0.06f, "multi-sample: center u");
+    expect_near(point.v, 0.5f, 0.06f, "multi-sample: center v");
+
+    gaze_cal_free(session);
+}
+
+void test_solve_point_gain_effect() {
+    const gaze_display_desc_t display = make_display();
+    gaze_calibration_t cal = make_front_calibration();
+    cal.yaw_bias_rad = 0.05f;
+    cal.pitch_bias_rad = 0.0f;
+    cal.yaw_gain = 1.0f;
+    cal.pitch_gain = 1.0f;
+
+    const gaze_provider_sample_t sample = make_sample_with_head_yaw(0, 0, 0, 0, 0, 1.0f, 0.3f);
+    gaze_screen_point_t point_g1{};
+    expect_true(gaze_solve_point(&sample, &cal, &display, &point_g1) == GAZE_OK, "gain-effect: solve g=1");
+
+    cal.yaw_gain = 1.5f;
+    gaze_screen_point_t point_g15{};
+    expect_true(gaze_solve_point(&sample, &cal, &display, &point_g15) == GAZE_OK, "gain-effect: solve g=1.5");
+
+    expect_true(std::fabs(point_g1.u - point_g15.u) > 0.001f,
+        "gain-effect: different gain should produce different u");
+}
+
+void test_refit_preserves_gain() {
+    const gaze_display_desc_t display = make_display();
+    gaze_calibration_t base = make_front_calibration();
+    base.yaw_gain = 1.2f;
+    base.pitch_gain = 0.9f;
+    base.yaw_bias_rad = 0.02f;
+    base.pitch_bias_rad = -0.01f;
+
+    const std::array<gaze_refit_observation_t, 5> observations{{
+        make_refit_observation(0.5f, 0.5f, make_sample(0.02f, 0.0f, 0.0f, -0.02f, 0.0f, 0.6f)),
+        make_refit_observation(0.2f, 0.2f, make_sample(0.02f, 0.0f, 0.0f, 0.16f, 0.102f, 0.6f)),
+        make_refit_observation(0.8f, 0.2f, make_sample(0.02f, 0.0f, 0.0f, -0.20f, 0.102f, 0.6f)),
+        make_refit_observation(0.2f, 0.8f, make_sample(0.02f, 0.0f, 0.0f, 0.16f, -0.102f, 0.6f)),
+        make_refit_observation(0.8f, 0.8f, make_sample(0.02f, 0.0f, 0.0f, -0.20f, -0.102f, 0.6f)),
+    }};
+
+    gaze_calibration_t refit{};
+    expect_true(
+        gaze_refit_pose(&base, &display, observations.data(), observations.size(), &refit) == GAZE_OK,
+        "refit-gain: should succeed"
+    );
+    expect_near(refit.yaw_gain, 1.2f, kTolerance, "refit-gain: yaw_gain preserved");
+    expect_near(refit.pitch_gain, 0.9f, kTolerance, "refit-gain: pitch_gain preserved");
+}
+
 }  // namespace
 
 int main() {
@@ -531,6 +938,15 @@ int main() {
     test_calibration_mixed_head_poses();
     test_bias_correction_face_frame_multiple_targets();
     test_head_translation_large_range();
+    test_calibration_phone_on_left();
+    test_calibration_phone_horizontal();
+    test_gain_optimization();
+    test_initialization_with_tilted_screen();
+    test_blob_round_trip_with_gain();
+    test_calibration_with_extreme_head_yaw();
+    test_many_samples_per_target();
+    test_solve_point_gain_effect();
+    test_refit_preserves_gain();
     std::cout << "core tests passed\n";
     return 0;
 }
