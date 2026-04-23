@@ -636,13 +636,23 @@ State initialize_state(const std::vector<Observation>& observations, const gaze_
     }
     avg_dir = normalized(avg_dir / static_cast<float>(std::max(1, count)));
 
-    const Vec3 screen_normal = -1.0f * avg_dir;
-    const Vec3 up_hint = estimate_up_from_observations(observations, screen_normal);
+    const Vec3 up_hint = estimate_up_from_observations(observations, avg_dir);
 
-    State state;
-    state.center = center;
-    state.rotation = build_basis_from_normal(screen_normal, up_hint);
-    return state;
+    State s_fwd;
+    s_fwd.center = center;
+    s_fwd.rotation = build_basis_from_normal(avg_dir, up_hint);
+
+    State s_bwd;
+    s_bwd.center = center;
+    s_bwd.rotation = build_basis_from_normal(-1.0f * avg_dir, up_hint);
+
+    const auto r_fwd = build_residuals(observations, display, s_fwd, 0.0f);
+    const auto r_bwd = build_residuals(observations, display, s_bwd, 0.0f);
+    float cost_fwd = 0.0f, cost_bwd = 0.0f;
+    for (float v : r_fwd) cost_fwd += v * v;
+    for (float v : r_bwd) cost_bwd += v * v;
+
+    return (cost_fwd <= cost_bwd) ? s_fwd : s_bwd;
 }
 
 void store_transform(const State& state, float out[16]) {
