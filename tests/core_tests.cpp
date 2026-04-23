@@ -34,9 +34,16 @@ gaze_display_desc_t make_display() {
     };
 }
 
+gaze_tangent_affine_t identity_tangent_affine() {
+    gaze_tangent_affine_t t{};
+    t.G_yy = 1.0f;
+    t.G_pp = 1.0f;
+    return t;
+}
+
 gaze_calibration_t make_front_calibration() {
     gaze_calibration_t calibration{};
-    calibration.version = 1.0f;
+    calibration.version = 2.0f;
     calibration.screen_width_mm = 600.0f;
     calibration.screen_height_mm = 340.0f;
     calibration.T_provider_from_screen[0] = -1.0f;
@@ -44,8 +51,10 @@ gaze_calibration_t make_front_calibration() {
     calibration.T_provider_from_screen[10] = -1.0f;
     calibration.T_provider_from_screen[15] = 1.0f;
     calibration.T_provider_from_screen[14] = 0.6f;
-    calibration.yaw_gain = 1.0f;
-    calibration.pitch_gain = 1.0f;
+    calibration.no_glasses = identity_tangent_affine();
+    calibration.glasses = identity_tangent_affine();
+    calibration.has_glasses = 0u;
+    calibration.active_state = GAZE_STATE_NO_GLASSES;
     return calibration;
 }
 
@@ -223,8 +232,14 @@ void test_refit_pose() {
 
 void test_calibration_blob_round_trip() {
     gaze_calibration_t calibration = make_front_calibration();
-    calibration.yaw_bias_rad = 0.01f;
-    calibration.pitch_bias_rad = -0.02f;
+    calibration.no_glasses.b_yaw = 0.01f;
+    calibration.no_glasses.b_pitch = -0.02f;
+    calibration.glasses.G_yy = 1.1f;
+    calibration.glasses.G_pp = 0.9f;
+    calibration.glasses.G_yp = 0.05f;
+    calibration.glasses.b_yaw = -0.005f;
+    calibration.has_glasses = 1u;
+    calibration.active_state = GAZE_STATE_GLASSES;
     calibration.residual_u[0] = 0.03f;
     calibration.residual_v[5] = -0.01f;
     calibration.rmse_px = 12.0f;
@@ -247,8 +262,14 @@ void test_calibration_blob_round_trip() {
     expect_near(decoded.screen_height_mm, calibration.screen_height_mm, kTolerance, "blob height");
     expect_near(decoded.T_provider_from_screen[12], calibration.T_provider_from_screen[12], kTolerance, "blob tx");
     expect_near(decoded.T_provider_from_screen[14], calibration.T_provider_from_screen[14], kTolerance, "blob tz");
-    expect_near(decoded.yaw_bias_rad, calibration.yaw_bias_rad, kTolerance, "blob yaw bias");
-    expect_near(decoded.pitch_bias_rad, calibration.pitch_bias_rad, kTolerance, "blob pitch bias");
+    expect_near(decoded.no_glasses.b_yaw, calibration.no_glasses.b_yaw, kTolerance, "blob no_glasses b_yaw");
+    expect_near(decoded.no_glasses.b_pitch, calibration.no_glasses.b_pitch, kTolerance, "blob no_glasses b_pitch");
+    expect_near(decoded.glasses.G_yy, calibration.glasses.G_yy, kTolerance, "blob glasses G_yy");
+    expect_near(decoded.glasses.G_pp, calibration.glasses.G_pp, kTolerance, "blob glasses G_pp");
+    expect_near(decoded.glasses.G_yp, calibration.glasses.G_yp, kTolerance, "blob glasses G_yp");
+    expect_near(decoded.glasses.b_yaw, calibration.glasses.b_yaw, kTolerance, "blob glasses b_yaw");
+    expect_true(decoded.has_glasses == 1u, "blob has_glasses");
+    expect_true(decoded.active_state == GAZE_STATE_GLASSES, "blob active_state");
     expect_near(decoded.residual_u[0], calibration.residual_u[0], kTolerance, "blob residual u");
     expect_near(decoded.residual_v[5], calibration.residual_v[5], kTolerance, "blob residual v");
     expect_true(decoded.sample_count == calibration.sample_count, "blob sample count");
@@ -642,9 +663,9 @@ void test_calibration_phone_on_right() {
 
     {
         char msg[128];
-        std::snprintf(msg, sizeof(msg), "phone-right: yaw_bias=%.3f should be small",
-                      calibration.yaw_bias_rad);
-        expect_true(std::fabs(calibration.yaw_bias_rad) < 0.785f, msg);
+        std::snprintf(msg, sizeof(msg), "phone-right: b_yaw=%.3f should be small",
+                      calibration.no_glasses.b_yaw);
+        expect_true(std::fabs(calibration.no_glasses.b_yaw) < 0.785f, msg);
     }
 
     {
@@ -730,13 +751,13 @@ void test_calibration_phone_horizontal() {
     gaze_cal_free(session);
 }
 
-void test_gain_optimization() {
+void test_bias_recovery() {
     const gaze_display_desc_t display = make_display();
     const float yaw_bias = 0.05f;
     const float pitch_bias = -0.03f;
 
     gaze_cal_session_t* session = gaze_cal_begin(&display, GAZE_CAL_MODE_FULL);
-    expect_true(session != nullptr, "gain: session created");
+    expect_true(session != nullptr, "bias: session created");
 
     const std::vector<std::pair<float, float>> targets{
         {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
@@ -754,14 +775,18 @@ void test_gain_optimization() {
     }
 
     gaze_calibration_t calibration{};
-    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "gain: solve");
+    expect_true(gaze_cal_solve(session, &calibration) == GAZE_OK, "bias: solve");
 
-    expect_true(std::isfinite(calibration.yaw_gain), "gain: yaw_gain should be finite");
-    expect_true(std::isfinite(calibration.pitch_gain), "gain: pitch_gain should be finite");
-    expect_true(calibration.yaw_gain > 0.3f && calibration.yaw_gain < 3.0f,
-        "gain: yaw_gain should be in reasonable range");
-    expect_true(calibration.pitch_gain > 0.3f && calibration.pitch_gain < 3.0f,
-        "gain: pitch_gain should be in reasonable range");
+    expect_true(std::isfinite(calibration.no_glasses.b_yaw), "bias: b_yaw should be finite");
+    expect_true(std::isfinite(calibration.no_glasses.b_pitch), "bias: b_pitch should be finite");
+    // Bias can be partially absorbed into pose rotation when the head-yaw
+    // span happens to align with the injected bias axis, so we only require
+    // the recovered parameters to be in a physically sensible range. The
+    // real regression check is the runtime-solve error below.
+    expect_true(std::fabs(calibration.no_glasses.b_yaw) < 0.30f,
+                "bias: b_yaw should be in reasonable range");
+    expect_true(std::fabs(calibration.no_glasses.b_pitch) < 0.30f,
+                "bias: b_pitch should be in reasonable range");
 
     const float test_yaw = 0.45f;
     const test_math::V3 test_eye{0.12f, 0.02f, 0.04f};
@@ -772,11 +797,11 @@ void test_gain_optimization() {
         const auto dir = test_math::biased_gaze(test_eye, tu, tv, yaw_bias, pitch_bias, test_yaw);
         const auto sample = make_sample_with_head_yaw(test_eye.x, test_eye.y, test_eye.z, dir.x, dir.y, dir.z, test_yaw);
         gaze_screen_point_t point{};
-        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "gain: solve point");
+        expect_true(gaze_solve_point(&sample, &calibration, &display, &point) == GAZE_OK, "bias: solve point");
         char msg[128];
-        std::snprintf(msg, sizeof(msg), "gain u: actual=%.3f expected=%.2f", point.u, tu);
+        std::snprintf(msg, sizeof(msg), "bias u: actual=%.3f expected=%.2f", point.u, tu);
         expect_near(point.u, tu, 0.08f, msg);
-        std::snprintf(msg, sizeof(msg), "gain v: actual=%.3f expected=%.2f", point.v, tv);
+        std::snprintf(msg, sizeof(msg), "bias v: actual=%.3f expected=%.2f", point.v, tv);
         expect_near(point.v, tv, 0.08f, msg);
     }
 
@@ -830,12 +855,18 @@ void test_initialization_with_tilted_screen() {
     gaze_cal_free(session);
 }
 
-void test_blob_round_trip_with_gain() {
+void test_blob_round_trip_glasses_fields() {
     gaze_calibration_t calibration = make_front_calibration();
-    calibration.yaw_bias_rad = 0.03f;
-    calibration.pitch_bias_rad = -0.02f;
-    calibration.yaw_gain = 1.15f;
-    calibration.pitch_gain = 0.85f;
+    calibration.no_glasses.b_yaw = 0.03f;
+    calibration.no_glasses.b_pitch = -0.02f;
+    calibration.glasses.G_yy = 1.15f;
+    calibration.glasses.G_yp = 0.04f;
+    calibration.glasses.G_py = -0.03f;
+    calibration.glasses.G_pp = 0.85f;
+    calibration.glasses.b_yaw = -0.01f;
+    calibration.glasses.b_pitch = 0.02f;
+    calibration.has_glasses = 1u;
+    calibration.active_state = GAZE_STATE_GLASSES;
     calibration.rmse_px = 15.0f;
     calibration.median_err_px = 11.0f;
     calibration.sample_count = 90u;
@@ -843,18 +874,24 @@ void test_blob_round_trip_with_gain() {
     std::vector<unsigned char> blob(gaze_calibration_blob_size());
     expect_true(
         gaze_calibration_serialize(&calibration, blob.data(), blob.size()) == GAZE_OK,
-        "gain blob: serialize"
+        "glasses blob: serialize"
     );
 
     gaze_calibration_t decoded{};
     expect_true(
         gaze_calibration_deserialize(blob.data(), blob.size(), &decoded) == GAZE_OK,
-        "gain blob: deserialize"
+        "glasses blob: deserialize"
     );
-    expect_near(decoded.yaw_gain, 1.15f, kTolerance, "gain blob: yaw_gain");
-    expect_near(decoded.pitch_gain, 0.85f, kTolerance, "gain blob: pitch_gain");
-    expect_near(decoded.yaw_bias_rad, 0.03f, kTolerance, "gain blob: yaw_bias");
-    expect_near(decoded.pitch_bias_rad, -0.02f, kTolerance, "gain blob: pitch_bias");
+    expect_near(decoded.glasses.G_yy, 1.15f, kTolerance, "glasses blob: G_yy");
+    expect_near(decoded.glasses.G_yp, 0.04f, kTolerance, "glasses blob: G_yp");
+    expect_near(decoded.glasses.G_py, -0.03f, kTolerance, "glasses blob: G_py");
+    expect_near(decoded.glasses.G_pp, 0.85f, kTolerance, "glasses blob: G_pp");
+    expect_near(decoded.glasses.b_yaw, -0.01f, kTolerance, "glasses blob: b_yaw");
+    expect_near(decoded.glasses.b_pitch, 0.02f, kTolerance, "glasses blob: b_pitch");
+    expect_near(decoded.no_glasses.b_yaw, 0.03f, kTolerance, "glasses blob: no_glasses b_yaw");
+    expect_near(decoded.no_glasses.b_pitch, -0.02f, kTolerance, "glasses blob: no_glasses b_pitch");
+    expect_true(decoded.has_glasses == 1u, "glasses blob: has_glasses preserved");
+    expect_true(decoded.active_state == GAZE_STATE_GLASSES, "glasses blob: active_state preserved");
 }
 
 void test_calibration_with_extreme_head_yaw() {
@@ -952,33 +989,38 @@ void test_many_samples_per_target() {
     gaze_cal_free(session);
 }
 
-void test_solve_point_gain_effect() {
+void test_solve_point_glasses_vs_bare() {
     const gaze_display_desc_t display = make_display();
     gaze_calibration_t cal = make_front_calibration();
-    cal.yaw_bias_rad = 0.05f;
-    cal.pitch_bias_rad = 0.0f;
-    cal.yaw_gain = 1.0f;
-    cal.pitch_gain = 1.0f;
+    cal.no_glasses.b_yaw = 0.0f;
+    cal.glasses.G_yy = 1.5f;
+    cal.glasses.b_yaw = 0.0f;
+    cal.has_glasses = 1u;
 
-    const gaze_provider_sample_t sample = make_sample_with_head_yaw(0, 0, 0, 0, 0, 1.0f, 0.3f);
-    gaze_screen_point_t point_g1{};
-    expect_true(gaze_solve_point(&sample, &cal, &display, &point_g1) == GAZE_OK, "gain-effect: solve g=1");
+    const gaze_provider_sample_t sample = make_sample_with_head_yaw(0, 0, 0, 0.05f, 0, 1.0f, 0.0f);
+    gaze_screen_point_t point_bare{};
+    expect_true(gaze_solve_point(&sample, &cal, &display, &point_bare) == GAZE_OK,
+                "state-switch: bare solve");
 
-    cal.yaw_gain = 1.5f;
-    gaze_screen_point_t point_g15{};
-    expect_true(gaze_solve_point(&sample, &cal, &display, &point_g15) == GAZE_OK, "gain-effect: solve g=1.5");
+    expect_true(gaze_set_active_state(&cal, GAZE_STATE_GLASSES) == GAZE_OK,
+                "state-switch: enable glasses");
+    gaze_screen_point_t point_glasses{};
+    expect_true(gaze_solve_point(&sample, &cal, &display, &point_glasses) == GAZE_OK,
+                "state-switch: glasses solve");
 
-    expect_true(std::fabs(point_g1.u - point_g15.u) > 0.001f,
-        "gain-effect: different gain should produce different u");
+    expect_true(std::fabs(point_bare.u - point_glasses.u) > 0.001f,
+        "state-switch: glasses G != I should produce different u");
 }
 
-void test_refit_preserves_gain() {
+void test_refit_preserves_face_correction() {
     const gaze_display_desc_t display = make_display();
     gaze_calibration_t base = make_front_calibration();
-    base.yaw_gain = 1.2f;
-    base.pitch_gain = 0.9f;
-    base.yaw_bias_rad = 0.02f;
-    base.pitch_bias_rad = -0.01f;
+    base.no_glasses.b_yaw = 0.02f;
+    base.no_glasses.b_pitch = -0.01f;
+    base.glasses.G_yy = 1.2f;
+    base.glasses.G_pp = 0.9f;
+    base.glasses.b_yaw = 0.015f;
+    base.has_glasses = 1u;
 
     const std::array<gaze_refit_observation_t, 5> observations{{
         make_refit_observation(0.5f, 0.5f, make_sample(0.02f, 0.0f, 0.0f, -0.02f, 0.0f, 0.6f)),
@@ -991,10 +1033,14 @@ void test_refit_preserves_gain() {
     gaze_calibration_t refit{};
     expect_true(
         gaze_refit_pose(&base, &display, observations.data(), observations.size(), &refit) == GAZE_OK,
-        "refit-gain: should succeed"
+        "refit: should succeed"
     );
-    expect_near(refit.yaw_gain, 1.2f, kTolerance, "refit-gain: yaw_gain preserved");
-    expect_near(refit.pitch_gain, 0.9f, kTolerance, "refit-gain: pitch_gain preserved");
+    expect_near(refit.no_glasses.b_yaw, 0.02f, kTolerance, "refit: no_glasses b_yaw preserved");
+    expect_near(refit.no_glasses.b_pitch, -0.01f, kTolerance, "refit: no_glasses b_pitch preserved");
+    expect_near(refit.glasses.G_yy, 1.2f, kTolerance, "refit: glasses G_yy preserved");
+    expect_near(refit.glasses.G_pp, 0.9f, kTolerance, "refit: glasses G_pp preserved");
+    expect_near(refit.glasses.b_yaw, 0.015f, kTolerance, "refit: glasses b_yaw preserved");
+    expect_true(refit.has_glasses == 1u, "refit: has_glasses preserved");
 }
 
 void test_quality_gate_rejects_bad_calibration() {
@@ -1076,12 +1122,109 @@ void test_dual_optimization_picks_better_orientation() {
         expect_true(solve_result == GAZE_OK, msg);
         std::snprintf(msg, sizeof(msg), "dual-opt trial %d: rmse=%.1f should be < 100", trial, calibration.rmse_px);
         expect_true(calibration.rmse_px < 100.0f, msg);
-        std::snprintf(msg, sizeof(msg), "dual-opt trial %d: |yaw_bias|=%.2f° should be < 45°",
-                      trial, std::fabs(calibration.yaw_bias_rad) * 180.0f / 3.14159f);
-        expect_true(std::fabs(calibration.yaw_bias_rad) < 0.785f, msg);
+        std::snprintf(msg, sizeof(msg), "dual-opt trial %d: |b_yaw|=%.2f° should be < 45°",
+                      trial, std::fabs(calibration.no_glasses.b_yaw) * 180.0f / 3.14159f);
+        expect_true(std::fabs(calibration.no_glasses.b_yaw) < 0.785f, msg);
 
         gaze_cal_free(session);
     }
+}
+
+void test_glasses_closed_form_recovery() {
+    const gaze_display_desc_t display = make_display();
+
+    // Canonical baseline: screen 0.6m in front, +x = -x_p, +y = +y_p, face
+    // correction at identity. This is what make_front_calibration() gives.
+    gaze_calibration_t baseline = make_front_calibration();
+
+    // Ground-truth glasses transform we want the solver to recover.
+    const float GT_G_yy = 1.2f;
+    const float GT_G_yp = 0.04f;
+    const float GT_G_py = -0.03f;
+    const float GT_G_pp = 0.8f;
+    const float GT_b_yaw = 0.02f;
+    const float GT_b_pitch = -0.01f;
+
+    gaze_cal_session_t* session = gaze_cal_begin_glasses(&display, &baseline);
+    expect_true(session != nullptr, "glasses: session created");
+
+    const std::vector<std::pair<float, float>> targets{
+        {0.15f, 0.15f}, {0.50f, 0.15f}, {0.85f, 0.15f},
+        {0.15f, 0.50f}, {0.50f, 0.50f}, {0.85f, 0.50f},
+        {0.15f, 0.85f}, {0.50f, 0.85f}, {0.85f, 0.85f},
+    };
+    const float head_yaws[] = {0.0f, 0.2f, -0.15f, -0.25f, 0.1f, 0.3f, 0.15f, -0.2f, -0.3f};
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        gaze_cal_push_target(session, targets[i].first, targets[i].second, static_cast<uint32_t>(i));
+
+        const test_math::V3 eye{0.0f, 0.0f, 0.0f};
+        const test_math::V3 target = test_math::screen_point_front(targets[i].first, targets[i].second);
+        const auto dir_true_p = test_math::normalize(test_math::sub(target, eye));
+        const auto dir_true_f = test_math::rot_y(dir_true_p, -head_yaws[i]);
+
+        // Decompose true gaze into face-frame Tait-Bryan tangents.
+        const float yaw_true = std::atan2(dir_true_f.x, dir_true_f.z);
+        const float y_clamped = std::max(-0.999999f, std::min(0.999999f, dir_true_f.y));
+        const float pitch_true = -std::asin(y_clamped);
+
+        // Glasses distort the true gaze: given (yaw_true, pitch_true), the raw
+        // ARKit tangent (yaw_raw, pitch_raw) satisfies:
+        //     G_gt * (yaw_raw, pitch_raw) + b_gt = (yaw_true, pitch_true)
+        // so invert a 2x2 to get (yaw_raw, pitch_raw).
+        const float y_in = yaw_true - GT_b_yaw;
+        const float p_in = pitch_true - GT_b_pitch;
+        const float det = GT_G_yy * GT_G_pp - GT_G_yp * GT_G_py;
+        const float yaw_raw = (GT_G_pp * y_in - GT_G_yp * p_in) / det;
+        const float pitch_raw = (-GT_G_py * y_in + GT_G_yy * p_in) / det;
+
+        // Rebuild raw direction in face frame, rotate back to provider frame.
+        const float sp = std::sin(pitch_raw);
+        const float cp = std::cos(pitch_raw);
+        const test_math::V3 dir_raw_f{
+            std::sin(yaw_raw) * cp,
+            -sp,
+            std::cos(yaw_raw) * cp,
+        };
+        const auto dir_raw_p = test_math::normalize(test_math::rot_y(dir_raw_f, head_yaws[i]));
+
+        const auto sample = make_sample_with_head_yaw(
+            eye.x, eye.y, eye.z, dir_raw_p.x, dir_raw_p.y, dir_raw_p.z, head_yaws[i]);
+        gaze_cal_push_sample(session, &sample, static_cast<uint32_t>(i));
+    }
+
+    gaze_calibration_t calibration{};
+    const int rc = gaze_cal_solve_glasses(session, &calibration);
+    expect_true(rc == GAZE_OK, "glasses: solve should succeed");
+    expect_true(calibration.has_glasses == 1u, "glasses: has_glasses=1");
+    expect_true(calibration.active_state == GAZE_STATE_GLASSES, "glasses: active_state=GLASSES");
+
+    expect_near(calibration.glasses.G_yy, GT_G_yy, 0.02f, "glasses: G_yy recovered");
+    expect_near(calibration.glasses.G_yp, GT_G_yp, 0.02f, "glasses: G_yp recovered");
+    expect_near(calibration.glasses.G_py, GT_G_py, 0.02f, "glasses: G_py recovered");
+    expect_near(calibration.glasses.G_pp, GT_G_pp, 0.02f, "glasses: G_pp recovered");
+    expect_near(calibration.glasses.b_yaw, GT_b_yaw, 0.01f, "glasses: b_yaw recovered");
+    expect_near(calibration.glasses.b_pitch, GT_b_pitch, 0.01f, "glasses: b_pitch recovered");
+
+    gaze_cal_free(session);
+}
+
+void test_glasses_state_switching() {
+    gaze_calibration_t cal = make_front_calibration();
+    // Without has_glasses, switching to GLASSES must be rejected.
+    expect_true(gaze_set_active_state(&cal, GAZE_STATE_GLASSES) == GAZE_ERROR_MISSING_BASELINE,
+                "state: reject GLASSES when no glasses calibrated");
+    expect_true(gaze_set_active_state(&cal, GAZE_STATE_NO_GLASSES) == GAZE_OK,
+                "state: always accept NO_GLASSES");
+
+    cal.has_glasses = 1u;
+    cal.glasses.G_yy = 1.1f;
+    expect_true(gaze_set_active_state(&cal, GAZE_STATE_GLASSES) == GAZE_OK,
+                "state: accept GLASSES when calibrated");
+    expect_true(cal.active_state == GAZE_STATE_GLASSES, "state: active_state updated");
+
+    expect_true(gaze_set_active_state(&cal, 42u) == GAZE_ERROR_INVALID_ARGUMENT,
+                "state: reject invalid state value");
 }
 
 }  // namespace
@@ -1101,15 +1244,17 @@ int main() {
     test_calibration_phone_on_left();
     test_calibration_phone_on_right();
     test_calibration_phone_horizontal();
-    test_gain_optimization();
+    test_bias_recovery();
     test_initialization_with_tilted_screen();
-    test_blob_round_trip_with_gain();
+    test_blob_round_trip_glasses_fields();
     test_calibration_with_extreme_head_yaw();
     test_many_samples_per_target();
-    test_solve_point_gain_effect();
-    test_refit_preserves_gain();
+    test_solve_point_glasses_vs_bare();
+    test_refit_preserves_face_correction();
     test_quality_gate_rejects_bad_calibration();
     test_dual_optimization_picks_better_orientation();
+    test_glasses_closed_form_recovery();
+    test_glasses_state_switching();
     std::cout << "core tests passed\n";
     return 0;
 }

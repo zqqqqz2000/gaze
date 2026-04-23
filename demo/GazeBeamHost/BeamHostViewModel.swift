@@ -27,6 +27,9 @@ final class BeamHostViewModel: ObservableObject {
     }
     @Published var calibrationStatus = "uncalibrated"
     @Published var calibrationDetail = "run 9-point host calibration"
+    @Published var activeGlassesMode: GazeActiveState = .noGlasses {
+        didSet { applyActiveGlassesMode(oldValue: oldValue) }
+    }
     @Published var logLines: [String] = []
     @Published var logFilePath = HostFileLogger.shared.logFileURL.path
 
@@ -35,6 +38,8 @@ final class BeamHostViewModel: ObservableObject {
     let usbDevicePort: UInt16 = 9100
     var hasCalibration: Bool { calibration != nil }
     var isCalibrating: Bool { calibrationTask != nil }
+    var isGlassesCalibration: Bool { currentCalibrationMode == .glasses }
+    var glassesCalibrated: Bool { calibration?.hasGlasses == true }
     var isUSBBridgeRunning: Bool { usbBridge.isRunning }
     var canStartUSBBridge: Bool { USBMuxBridge.resolveExecutablePath() != nil }
 
@@ -45,9 +50,12 @@ final class BeamHostViewModel: ObservableObject {
     private let fileLogger = HostFileLogger.shared
     private let uncalibratedMapper = GazeScreenMapper()
     private var didStart = false
-    private var calibration: GazeCalibration?
+    private var calibration: GazeCalibration? {
+        didSet { syncActiveGlassesModeFromCalibration() }
+    }
     private var calibrationCollector: CalibrationCollector?
     private var calibrationTask: Task<Void, Never>?
+    private var currentCalibrationMode: GazeCalibrationMode?
     private let calibrationPersistence = CalibrationPersistence()
     private var lastRuntimeStatus = "idle"
     private var usbClient: ProviderSampleClient?
@@ -344,9 +352,30 @@ final class BeamHostViewModel: ObservableObject {
         calibrationStatus = "starting calibration"
         calibrationDetail = "hold gaze on each target; move head slightly between points"
         overlayEnabled = true
+        currentCalibrationMode = .full
 
         calibrationTask = Task { @MainActor [weak self] in
-            await self?.runCalibration()
+            await self?.runCalibration(mode: .full)
+        }
+    }
+
+    func startGlassesCalibration() {
+        guard let baseline = calibration, !isCalibrating else {
+            appendLog("glasses calibration skipped: no bare-eye baseline or already running")
+            return
+        }
+        calibrationTask?.cancel()
+        calibrationTask = nil
+        gazeFilterX.reset()
+        gazeFilterY.reset()
+        calibrationStatus = "starting glasses calibration"
+        calibrationDetail = "put glasses on; look at each dot while gently turning your head"
+        overlayEnabled = true
+        currentCalibrationMode = .glasses
+        appendLog("glasses calibration requested (baseline rmse=\(String(format: "%.2f", baseline.rmsePixels))px)")
+
+        calibrationTask = Task { @MainActor [weak self] in
+            await self?.runCalibration(mode: .glasses)
         }
     }
 
@@ -366,12 +395,14 @@ final class BeamHostViewModel: ObservableObject {
         appendLog("calibration cleared")
     }
 
-    private func runCalibration() async {
-        appendLog("=== CALIBRATION SESSION BEGIN ===")
+    private func runCalibration(mode: GazeCalibrationMode) async {
+        let bannerTag = mode == .glasses ? "GLASSES CALIBRATION" : "CALIBRATION"
+        appendLog("=== \(bannerTag) SESSION BEGIN ===")
         defer {
             calibrationCollector = nil
             overlayModel.setCalibrationTarget(nil)
             calibrationTask = nil
+            currentCalibrationMode = nil
         }
 
         guard let displayContext = makeDisplayContext() else {
@@ -386,11 +417,30 @@ final class BeamHostViewModel: ObservableObject {
             + "\(String(format: "%.1f", desc.screenWidthMM))x\(String(format: "%.1f", desc.screenHeightMM)) mm, "
             + "frame=\(displayContext.frame)")
 
-        guard let calibrationSession = GazeCalibrationSession(display: desc, mode: .full) else {
-            calibrationStatus = "calibration failed"
-            calibrationDetail = "core calibration session could not start"
-            appendLog("calibration failed: session init returned nil")
-            return
+        let calibrationSession: GazeCalibrationSession
+        switch mode {
+        case .glasses:
+            guard let baseline = calibration else {
+                calibrationStatus = "glasses calibration failed"
+                calibrationDetail = "bare-eye baseline missing; run standard calibration first"
+                appendLog("glasses calibration aborted: no baseline calibration available")
+                return
+            }
+            guard let session = GazeCalibrationSession(display: desc, glassesBaseline: baseline) else {
+                calibrationStatus = "glasses calibration failed"
+                calibrationDetail = "core glasses session could not start"
+                appendLog("glasses calibration failed: session init returned nil")
+                return
+            }
+            calibrationSession = session
+        default:
+            guard let session = GazeCalibrationSession(display: desc, mode: mode) else {
+                calibrationStatus = "calibration failed"
+                calibrationDetail = "core calibration session could not start"
+                appendLog("calibration failed: session init returned nil")
+                return
+            }
+            calibrationSession = session
         }
 
         var pointDigests: [CalibrationPointDigest] = []
@@ -489,12 +539,25 @@ final class BeamHostViewModel: ObservableObject {
             appendLog("rmse=\(String(format: "%.2f", solvedCalibration.rmsePixels)) px, "
                 + "median=\(String(format: "%.2f", solvedCalibration.medianErrorPixels)) px, "
                 + "samples=\(solvedCalibration.sampleCount)")
-            appendLog("yawBias=\(String(format: "%.5f", solvedCalibration.yawBiasRad)) rad "
-                + "(\(String(format: "%.2f", solvedCalibration.yawBiasRad * 180 / .pi))°), "
-                + "pitchBias=\(String(format: "%.5f", solvedCalibration.pitchBiasRad)) rad "
-                + "(\(String(format: "%.2f", solvedCalibration.pitchBiasRad * 180 / .pi))°)")
-            appendLog("yawGain=\(String(format: "%.4f", solvedCalibration.yawGain)), "
-                + "pitchGain=\(String(format: "%.4f", solvedCalibration.pitchGain))")
+            let noGlasses = solvedCalibration.noGlassesAffine
+            appendLog("bareEye.b: yaw=\(String(format: "%.5f", noGlasses.bYaw)) rad "
+                + "(\(String(format: "%.2f", noGlasses.bYaw * 180 / .pi))°), "
+                + "pitch=\(String(format: "%.5f", noGlasses.bPitch)) rad "
+                + "(\(String(format: "%.2f", noGlasses.bPitch * 180 / .pi))°)")
+            appendLog("bareEye.G=[[\(String(format: "%.4f", noGlasses.gYawYaw)), "
+                + "\(String(format: "%.4f", noGlasses.gYawPitch))], "
+                + "[\(String(format: "%.4f", noGlasses.gPitchYaw)), "
+                + "\(String(format: "%.4f", noGlasses.gPitchPitch))]]")
+            if solvedCalibration.hasGlasses {
+                let g = solvedCalibration.glassesAffine
+                appendLog("glasses.b: yaw=\(String(format: "%.5f", g.bYaw)) rad, "
+                    + "pitch=\(String(format: "%.5f", g.bPitch)) rad")
+                appendLog("glasses.G=[[\(String(format: "%.4f", g.gYawYaw)), "
+                    + "\(String(format: "%.4f", g.gYawPitch))], "
+                    + "[\(String(format: "%.4f", g.gPitchYaw)), "
+                    + "\(String(format: "%.4f", g.gPitchPitch))]]")
+            }
+            appendLog("activeState=\(solvedCalibration.activeState == .glasses ? "glasses" : "no_glasses")")
             appendLog("screenInCal=\(String(format: "%.1f", solvedCalibration.screenWidthMM))x"
                 + "\(String(format: "%.1f", solvedCalibration.screenHeightMM)) mm")
 
@@ -540,7 +603,7 @@ final class BeamHostViewModel: ObservableObject {
             if solvedCalibration.rmsePixels > 120 {
                 appendLog("WARNING: high rmse; check fixation stability and screen metrics")
             }
-            let absBias = max(abs(solvedCalibration.yawBiasRad), abs(solvedCalibration.pitchBiasRad))
+            let absBias = max(abs(noGlasses.bYaw), abs(noGlasses.bPitch))
             if absBias > 0.15 {
                 appendLog("WARNING: bias is unusually large (\(String(format: "%.1f", absBias * 180 / .pi))°); "
                     + "calibration may degrade with head movement. "
@@ -890,17 +953,55 @@ final class BeamHostViewModel: ObservableObject {
         }
     }
 
+    private func applyActiveGlassesMode(oldValue: GazeActiveState) {
+        guard var cal = calibration else { return }
+        if activeGlassesMode == cal.activeState { return }
+        if activeGlassesMode == .glasses, !cal.hasGlasses {
+            appendLog("cannot activate glasses mode: no glasses calibration present")
+            activeGlassesMode = oldValue
+            return
+        }
+        do {
+            try cal.setActiveState(activeGlassesMode)
+            calibration = cal
+            try calibrationPersistence.save(cal)
+            appendLog("activeState updated to \(activeGlassesMode == .glasses ? "glasses" : "no_glasses")")
+        } catch {
+            appendLog("failed to switch active state: \(error.localizedDescription)")
+            activeGlassesMode = oldValue
+        }
+    }
+
+    private func syncActiveGlassesModeFromCalibration() {
+        let desired = calibration?.activeState ?? .noGlasses
+        if activeGlassesMode != desired {
+            activeGlassesMode = desired
+        }
+    }
+
     private func logCalibrationParams(_ cal: GazeCalibration) {
         appendLog("rmse=\(String(format: "%.2f", cal.rmsePixels))px "
             + "median=\(String(format: "%.2f", cal.medianErrorPixels))px "
             + "samples=\(cal.sampleCount)")
-        appendLog("yawBias=\(String(format: "%.5f", cal.yawBiasRad))rad "
-            + "(\(String(format: "%.2f", cal.yawBiasRad * 180 / .pi))°) "
-            + "pitchBias=\(String(format: "%.5f", cal.pitchBiasRad))rad "
-            + "(\(String(format: "%.2f", cal.pitchBiasRad * 180 / .pi))°)")
-        appendLog("yawGain=\(String(format: "%.4f", cal.yawGain)) "
-            + "pitchGain=\(String(format: "%.4f", cal.pitchGain)) "
+        let noGlasses = cal.noGlassesAffine
+        appendLog("bareEye.b: yaw=\(String(format: "%.5f", noGlasses.bYaw))rad "
+            + "(\(String(format: "%.2f", noGlasses.bYaw * 180 / .pi))°) "
+            + "pitch=\(String(format: "%.5f", noGlasses.bPitch))rad "
+            + "(\(String(format: "%.2f", noGlasses.bPitch * 180 / .pi))°)")
+        appendLog("bareEye.G=[[\(String(format: "%.4f", noGlasses.gYawYaw)),"
+            + "\(String(format: "%.4f", noGlasses.gYawPitch))],"
+            + "[\(String(format: "%.4f", noGlasses.gPitchYaw)),"
+            + "\(String(format: "%.4f", noGlasses.gPitchPitch))]] "
             + "screen=\(String(format: "%.1f", cal.screenWidthMM))x\(String(format: "%.1f", cal.screenHeightMM))mm")
+        if cal.hasGlasses {
+            let g = cal.glassesAffine
+            appendLog("glasses.G=[[\(String(format: "%.4f", g.gYawYaw)),"
+                + "\(String(format: "%.4f", g.gYawPitch))],"
+                + "[\(String(format: "%.4f", g.gPitchYaw)),"
+                + "\(String(format: "%.4f", g.gPitchPitch))]] "
+                + "b=(\(String(format: "%.5f", g.bYaw)), \(String(format: "%.5f", g.bPitch)))")
+        }
+        appendLog("activeState=\(cal.activeState == .glasses ? "glasses" : "no_glasses")")
         let T = cal.transformProviderFromScreen
         for row in 0..<4 {
             let cols = (0..<4).map { String(format: "%+.6f", T[row * 4 + $0]) }

@@ -22,7 +22,13 @@ enum {
     GAZE_ERROR_OUT_OF_RANGE = -4,
     GAZE_ERROR_BUFFER_TOO_SMALL = -5,
     GAZE_ERROR_BAD_ENCODING = -6,
-    GAZE_ERROR_CALIBRATION_QUALITY = -7
+    GAZE_ERROR_CALIBRATION_QUALITY = -7,
+    GAZE_ERROR_MISSING_BASELINE = -8
+};
+
+enum {
+    GAZE_STATE_NO_GLASSES = 0,
+    GAZE_STATE_GLASSES = 1
 };
 
 typedef struct {
@@ -52,16 +58,42 @@ typedef struct {
     uint32_t height_px;
 } gaze_display_desc_t;
 
+/*
+ * Tangent-affine face-frame correction.
+ *
+ * Given the ARKit gaze direction expressed in face frame, we decompose it
+ * into Tait-Bryan angles (yaw about +Y, pitch about +X, with +Z forward):
+ *
+ *     (yaw_raw, pitch_raw) = tangent(d_face_raw)
+ *
+ * We then map to the "true" gaze in tangent space as an affine function:
+ *
+ *     [yaw_corr  ]   [G_yy  G_yp] [yaw_raw  ]   [b_yaw  ]
+ *     [pitch_corr] = [G_py  G_pp] [pitch_raw] + [b_pitch]
+ *
+ * Identity calibration is G = I, b = 0. Non-identity G captures gain
+ * (eyeglass magnification), astigmatism (off-diagonal), and lens tilt; b
+ * captures constant prismatic offset (plus any ARKit-induced bias).
+ */
+typedef struct {
+    float G_yy;
+    float G_yp;
+    float G_py;
+    float G_pp;
+    float b_yaw;
+    float b_pitch;
+} gaze_tangent_affine_t;
+
 typedef struct {
     float version;
     float screen_width_mm;
     float screen_height_mm;
     float T_provider_from_screen[16];
 
-    float yaw_bias_rad;
-    float pitch_bias_rad;
-    float yaw_gain;
-    float pitch_gain;
+    gaze_tangent_affine_t no_glasses;
+    gaze_tangent_affine_t glasses;
+    uint32_t has_glasses;
+    uint32_t active_state;
 
     float residual_u[6];
     float residual_v[6];
@@ -98,7 +130,8 @@ typedef struct {
 typedef enum {
     GAZE_CAL_MODE_FULL = 0,
     GAZE_CAL_MODE_QUICK_REFIT = 1,
-    GAZE_CAL_MODE_VALIDATION = 2
+    GAZE_CAL_MODE_VALIDATION = 2,
+    GAZE_CAL_MODE_GLASSES = 3
 } gaze_cal_mode_t;
 
 typedef struct gaze_cal_session gaze_cal_session_t;
@@ -130,6 +163,24 @@ int gaze_refit_pose(
     size_t observation_count,
     gaze_calibration_t* out_calibration
 );
+
+/*
+ * Begin a glasses-calibration session. Takes a baseline (no-glasses)
+ * calibration as input; the screen pose and the no-glasses tangent-affine
+ * are held fixed while the glasses tangent-affine is fitted via closed-form
+ * linear least-squares.
+ */
+gaze_cal_session_t* gaze_cal_begin_glasses(
+    const gaze_display_desc_t* display,
+    const gaze_calibration_t* baseline_no_glasses
+);
+
+int gaze_cal_solve_glasses(
+    gaze_cal_session_t* session,
+    gaze_calibration_t* out_calibration
+);
+
+int gaze_set_active_state(gaze_calibration_t* calibration, uint32_t state);
 
 size_t gaze_calibration_blob_size(void);
 int gaze_calibration_serialize(

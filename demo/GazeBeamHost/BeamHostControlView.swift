@@ -1,4 +1,5 @@
 import SwiftUI
+import GazeCoreKit
 
 struct BeamHostControlView: View {
     @ObservedObject var viewModel: BeamHostViewModel
@@ -40,15 +41,34 @@ struct BeamHostControlView: View {
                         .foregroundStyle(.secondary)
                         .font(.system(.footnote))
                     HStack {
-                        Button(viewModel.isCalibrating ? "Calibrating..." : "Start Calibration") {
+                        Button(viewModel.isCalibrating && !viewModel.isGlassesCalibration
+                               ? "Calibrating..." : "Start Calibration") {
                             viewModel.startCalibration()
                         }
                         .disabled(viewModel.isCalibrating)
+
+                        Button(viewModel.isCalibrating && viewModel.isGlassesCalibration
+                               ? "Glasses Calibrating..." : "Calibrate Glasses") {
+                            viewModel.startGlassesCalibration()
+                        }
+                        .disabled(viewModel.isCalibrating || !viewModel.hasCalibration)
 
                         Button("Clear Calibration") {
                             viewModel.clearCalibration()
                         }
                         .disabled(!viewModel.hasCalibration && !viewModel.isCalibrating)
+                    }
+                    if viewModel.hasCalibration {
+                        HStack {
+                            Text("Active")
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: $viewModel.activeGlassesMode) {
+                                Text("No Glasses").tag(GazeActiveState.noGlasses)
+                                Text("Glasses").tag(GazeActiveState.glasses)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(!viewModel.glassesCalibrated || viewModel.isCalibrating)
+                        }
                     }
                 }
             }

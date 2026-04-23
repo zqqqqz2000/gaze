@@ -10,6 +10,7 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
     case bufferTooSmall
     case badEncoding
     case calibrationQuality
+    case missingBaseline
     case unknown(code: Int32)
 
     init(code: Int32) {
@@ -28,6 +29,8 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
             self = .badEncoding
         case Int32(GAZE_ERROR_CALIBRATION_QUALITY):
             self = .calibrationQuality
+        case Int32(GAZE_ERROR_MISSING_BASELINE):
+            self = .missingBaseline
         default:
             self = .unknown(code: code)
         }
@@ -49,9 +52,47 @@ public enum GazeCoreError: Error, Equatable, LocalizedError {
             return "Calibration payload is not decodable"
         case .calibrationQuality:
             return "Calibration quality too low; please retry"
+        case .missingBaseline:
+            return "Glasses calibration requires a no-glasses baseline"
         case .unknown(let code):
             return "Unknown gaze core error: \(code)"
         }
+    }
+}
+
+public enum GazeActiveState: UInt32, Sendable {
+    case noGlasses = 0
+    case glasses = 1
+}
+
+public struct GazeTangentAffine: Sendable, Equatable {
+    public var gYawYaw: Float
+    public var gYawPitch: Float
+    public var gPitchYaw: Float
+    public var gPitchPitch: Float
+    public var bYaw: Float
+    public var bPitch: Float
+
+    public static let identity = GazeTangentAffine(
+        gYawYaw: 1, gYawPitch: 0, gPitchYaw: 0, gPitchPitch: 1, bYaw: 0, bPitch: 0
+    )
+
+    fileprivate init(rawValue: gaze_tangent_affine_t) {
+        self.gYawYaw = rawValue.G_yy
+        self.gYawPitch = rawValue.G_yp
+        self.gPitchYaw = rawValue.G_py
+        self.gPitchPitch = rawValue.G_pp
+        self.bYaw = rawValue.b_yaw
+        self.bPitch = rawValue.b_pitch
+    }
+
+    public init(gYawYaw: Float, gYawPitch: Float, gPitchYaw: Float, gPitchPitch: Float, bYaw: Float, bPitch: Float) {
+        self.gYawYaw = gYawYaw
+        self.gYawPitch = gYawPitch
+        self.gPitchYaw = gPitchYaw
+        self.gPitchPitch = gPitchPitch
+        self.bYaw = bYaw
+        self.bPitch = bPitch
     }
 }
 
@@ -104,6 +145,7 @@ public enum GazeCalibrationMode: Sendable {
     case full
     case quickRefit
     case validation
+    case glasses
 
     fileprivate var rawValue: gaze_cal_mode_t {
         switch self {
@@ -113,6 +155,8 @@ public enum GazeCalibrationMode: Sendable {
             return GAZE_CAL_MODE_QUICK_REFIT
         case .validation:
             return GAZE_CAL_MODE_VALIDATION
+        case .glasses:
+            return GAZE_CAL_MODE_GLASSES
         }
     }
 }
@@ -124,10 +168,12 @@ public struct GazeCalibration: Sendable {
     public var medianErrorPixels: Float { rawValue.median_err_px }
     public var sampleCount: UInt32 { rawValue.sample_count }
 
-    public var yawBiasRad: Float { rawValue.yaw_bias_rad }
-    public var pitchBiasRad: Float { rawValue.pitch_bias_rad }
-    public var yawGain: Float { rawValue.yaw_gain }
-    public var pitchGain: Float { rawValue.pitch_gain }
+    public var noGlassesAffine: GazeTangentAffine { GazeTangentAffine(rawValue: rawValue.no_glasses) }
+    public var glassesAffine: GazeTangentAffine { GazeTangentAffine(rawValue: rawValue.glasses) }
+    public var hasGlasses: Bool { rawValue.has_glasses != 0 }
+    public var activeState: GazeActiveState {
+        GazeActiveState(rawValue: rawValue.active_state) ?? .noGlasses
+    }
 
     public var screenWidthMM: Float { rawValue.screen_width_mm }
     public var screenHeightMM: Float { rawValue.screen_height_mm }
@@ -188,10 +234,20 @@ public struct GazeCalibration: Sendable {
         }
         return GazeSolvedPoint(rawValue: point)
     }
+
+    public mutating func setActiveState(_ state: GazeActiveState) throws {
+        let result = gaze_set_active_state(&rawValue, state.rawValue)
+        guard result == GAZE_OK else {
+            throw GazeCoreError(code: result)
+        }
+    }
+
+    fileprivate var cRawValue: gaze_calibration_t { rawValue }
 }
 
 public final class GazeCalibrationSession {
     private let rawSession: OpaquePointer
+    public let mode: GazeCalibrationMode
 
     public init?(display: GazeDisplayDescriptor, mode: GazeCalibrationMode = .full) {
         var rawDisplay = display.rawValue
@@ -199,6 +255,18 @@ public final class GazeCalibrationSession {
             return nil
         }
         self.rawSession = session
+        self.mode = mode
+    }
+
+    /// Begin a glasses-calibration session against a previously solved no-glasses baseline.
+    public init?(display: GazeDisplayDescriptor, glassesBaseline baseline: GazeCalibration) {
+        var rawDisplay = display.rawValue
+        var rawBaseline = baseline.cRawValue
+        guard let session = gaze_cal_begin_glasses(&rawDisplay, &rawBaseline) else {
+            return nil
+        }
+        self.rawSession = session
+        self.mode = .glasses
     }
 
     deinit {
@@ -236,7 +304,12 @@ public final class GazeCalibrationSession {
 
     public func solveWithQualityCheck() throws -> CalibrationResult {
         var calibration = gaze_calibration_t()
-        let result = gaze_cal_solve(rawSession, &calibration)
+        let result: Int32
+        if mode == .glasses {
+            result = gaze_cal_solve_glasses(rawSession, &calibration)
+        } else {
+            result = gaze_cal_solve(rawSession, &calibration)
+        }
         if result == GAZE_OK {
             return CalibrationResult(calibration: GazeCalibration(rawValue: calibration), qualityAcceptable: true)
         }

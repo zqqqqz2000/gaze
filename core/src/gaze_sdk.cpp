@@ -15,11 +15,13 @@ namespace {
 
 constexpr float kMetersPerMillimeter = 0.001f;
 constexpr float kMinDirectionNorm = 1e-6f;
-constexpr float kFiniteDifferenceEps = 1e-4f;
 constexpr float kPlaneParallelEps = 1e-5f;
 constexpr float kResidualFitRegularization = 0.01f;
+constexpr float kPosConvergence = 1e-5f;
+constexpr float kRotConvergence = 1e-5f;
+constexpr float kBiasConvergence = 1e-6f;
 constexpr uint8_t kCalibrationMagic[4] = {'G', 'Z', 'C', 'B'};
-constexpr uint32_t kCalibrationEncodingVersion = 1u;
+constexpr uint32_t kCalibrationEncodingVersion = 2u;
 
 struct Vec2 {
     float x = 0.0f;
@@ -38,14 +40,35 @@ struct Mat3 {
     Vec3 c2{0.0f, 0.0f, 1.0f};
 };
 
+struct TangentAffine {
+    // Row-major 2x2 gain matrix operating on (yaw_raw, pitch_raw):
+    //   [G_yy  G_yp]
+    //   [G_py  G_pp]
+    float G_yy = 1.0f;
+    float G_yp = 0.0f;
+    float G_py = 0.0f;
+    float G_pp = 1.0f;
+    float b_yaw = 0.0f;
+    float b_pitch = 0.0f;
+
+    static TangentAffine identity() { return TangentAffine{}; }
+};
+
 struct State {
     Mat3 rotation;
     Vec3 center;
-    float yaw_bias = 0.0f;
-    float pitch_bias = 0.0f;
-    float yaw_gain = 1.0f;
-    float pitch_gain = 1.0f;
+    TangentAffine face_correction;
 };
+
+gaze_tangent_affine_t to_c_tangent_affine(const TangentAffine& t) {
+    return gaze_tangent_affine_t{
+        t.G_yy, t.G_yp, t.G_py, t.G_pp, t.b_yaw, t.b_pitch,
+    };
+}
+
+TangentAffine from_c_tangent_affine(const gaze_tangent_affine_t& t) {
+    return TangentAffine{t.G_yy, t.G_yp, t.G_py, t.G_pp, t.b_yaw, t.b_pitch};
+}
 
 struct Observation {
     Vec2 target_uv;
@@ -140,26 +163,6 @@ Mat3 mul(const Mat3& a, const Mat3& b) {
     };
 }
 
-Mat3 rotation_x(float angle) {
-    const float c = std::cos(angle);
-    const float s = std::sin(angle);
-    return Mat3{
-        Vec3{1.0f, 0.0f, 0.0f},
-        Vec3{0.0f, c, s},
-        Vec3{0.0f, -s, c},
-    };
-}
-
-Mat3 rotation_y(float angle) {
-    const float c = std::cos(angle);
-    const float s = std::sin(angle);
-    return Mat3{
-        Vec3{c, 0.0f, -s},
-        Vec3{0.0f, 1.0f, 0.0f},
-        Vec3{s, 0.0f, c},
-    };
-}
-
 Mat3 skew(const Vec3& axis) {
     return Mat3{
         Vec3{0.0f, axis.z, -axis.y},
@@ -193,6 +196,16 @@ Mat3 rotation_from_axis_angle(const Vec3& axis_angle) {
     const Mat3 k = skew(axis);
     const Mat3 kk = mul(k, k);
     return add(add(identity_mat3(), scale(k, std::sin(angle))), scale(kk, 1.0f - std::cos(angle)));
+}
+
+// Modified Gram-Schmidt: re-orthonormalize a 3x3 that should be SO(3) but
+// has drifted due to accumulated float error across iterations.
+Mat3 orthonormalize(const Mat3& m) {
+    const Vec3 c0 = normalized(m.c0);
+    Vec3 c1 = m.c1 - c0 * dot(m.c1, c0);
+    c1 = normalized(c1);
+    const Vec3 c2 = cross(c0, c1);
+    return Mat3{c0, c1, c2};
 }
 
 Mat3 build_basis_from_normal(Vec3 z_axis, Vec3 up_hint = Vec3{0.0f, 1.0f, 0.0f}) {
@@ -244,19 +257,39 @@ Mat3 head_rotation_from_sample(const gaze_provider_sample_t& sample) {
     return mat3_from_quaternion(qx * inv_norm, qy * inv_norm, qz * inv_norm, qw * inv_norm);
 }
 
-Vec3 bias_correct_direction(
+// Tait-Bryan decomposition of a unit vector in face frame with the convention
+// forward = (0, 0, 1), up = (0, 1, 0), right = (1, 0, 0). Guards against
+// gimbal lock near pitch = +/- pi/2 (i.e. gazing straight up/down, which
+// cannot happen while looking at a screen in practice).
+Vec2 tangent_from_direction(const Vec3& d_face) {
+    const Vec3 n = normalized(d_face);
+    constexpr float kEps = 1e-6f;
+    const float y_clamped = std::max(-1.0f + kEps, std::min(1.0f - kEps, n.y));
+    return Vec2{std::atan2(n.x, n.z), -std::asin(y_clamped)};
+}
+
+Vec3 direction_from_tangent(float yaw, float pitch) {
+    const float sp = std::sin(pitch);
+    const float cp = std::cos(pitch);
+    return Vec3{std::sin(yaw) * cp, -sp, std::cos(yaw) * cp};
+}
+
+Vec3 apply_tangent_affine(const Vec3& d_face, const TangentAffine& T) {
+    const Vec2 raw = tangent_from_direction(d_face);
+    const float yaw_c = T.G_yy * raw.x + T.G_yp * raw.y + T.b_yaw;
+    const float pitch_c = T.G_py * raw.x + T.G_pp * raw.y + T.b_pitch;
+    return direction_from_tangent(yaw_c, pitch_c);
+}
+
+Vec3 correct_gaze_direction(
     const Vec3& direction,
-    float yaw_bias, float pitch_bias,
-    float yaw_gain, float pitch_gain,
+    const TangentAffine& T,
     const Mat3& R_provider_from_face
 ) {
     const Mat3 R_face_from_provider = transpose(R_provider_from_face);
     const Vec3 dir_face = mul(R_face_from_provider, normalized(direction));
-
-    const float effective_yaw = yaw_bias * yaw_gain;
-    const float effective_pitch = pitch_bias * pitch_gain;
-    const Vec3 corrected = mul(mul(rotation_y(effective_yaw), rotation_x(effective_pitch)), dir_face);
-    return normalized(mul(R_provider_from_face, corrected));
+    const Vec3 dir_face_corr = apply_tangent_affine(dir_face, T);
+    return normalized(mul(R_provider_from_face, dir_face_corr));
 }
 
 float clamp01(float value) {
@@ -391,27 +424,25 @@ std::vector<float> build_residuals(
     const DistancePrior& prior
 ) {
     std::vector<float> residuals;
-    residuals.reserve(observations.size() * 3 + 5);
+    residuals.reserve(observations.size() * 3 + 3);
     for (const Observation& observation : observations) {
         const Vec3 origin = make_vec3(observation.sample.gaze_origin_p_m);
         const Vec3 raw_dir = make_vec3(observation.sample.gaze_dir_p);
         const Mat3 R_pf = head_rotation_from_sample(observation.sample);
-        const Vec3 corrected_dir = bias_correct_direction(
-            raw_dir, state.yaw_bias, state.pitch_bias,
-            state.yaw_gain, state.pitch_gain, R_pf);
+        const Vec3 corrected_dir = correct_gaze_direction(raw_dir, state.face_correction, R_pf);
         const Vec3 target = screen_point_to_provider(display, state.rotation, state.center, observation.target_uv);
         const Vec3 expected_dir = normalized(target - origin);
         const float weight = std::max(0.2f, observation.sample.confidence);
-        const Vec3 delta = (corrected_dir - expected_dir) * weight;
+        // Tangent-plane residual: |cross(a,b)| = sin(theta) for unit vectors.
+        // This is a 3-vector with rank 2 (lies in the plane normal to expected_dir),
+        // so has no radial redundancy and is linear in the small-angle limit.
+        const Vec3 delta = cross(corrected_dir, expected_dir) * weight;
         residuals.push_back(delta.x);
         residuals.push_back(delta.y);
         residuals.push_back(delta.z);
     }
-    residuals.push_back(state.yaw_bias * bias_reg_weight);
-    residuals.push_back(state.pitch_bias * bias_reg_weight);
-    constexpr float kGainRegWeight = 0.3f;
-    residuals.push_back((state.yaw_gain - 1.0f) * kGainRegWeight);
-    residuals.push_back((state.pitch_gain - 1.0f) * kGainRegWeight);
+    residuals.push_back(state.face_correction.b_yaw * bias_reg_weight);
+    residuals.push_back(state.face_correction.b_pitch * bias_reg_weight);
 
     const Vec3 diff = state.center - prior.mean_eye;
     const float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
@@ -424,14 +455,10 @@ State apply_delta(const State& state, const std::vector<float>& delta, bool incl
     State next = state;
     next.center = next.center + Vec3{delta[0], delta[1], delta[2]};
     const Mat3 delta_rotation = rotation_from_axis_angle(Vec3{delta[3], delta[4], delta[5]});
-    next.rotation = mul(delta_rotation, next.rotation);
+    next.rotation = orthonormalize(mul(delta_rotation, next.rotation));
     if (include_bias) {
-        next.yaw_bias += delta[6];
-        next.pitch_bias += delta[7];
-        if (delta.size() > 8) {
-            next.yaw_gain += delta[8];
-            next.pitch_gain += delta[9];
-        }
+        next.face_correction.b_yaw += delta[6];
+        next.face_correction.b_pitch += delta[7];
     }
     return next;
 }
@@ -487,10 +514,20 @@ bool gauss_newton_optimize(
     float bias_reg_weight,
     const DistancePrior& prior
 ) {
-    const int parameter_count = optimize_bias ? 10 : 6;
+    const int parameter_count = optimize_bias ? 8 : 6;
     if (observations.size() < 4) {
         return false;
     }
+
+    // Per-parameter finite-difference step sizes. Using the same eps across
+    // parameters with different natural scales (meters vs radians) wastes
+    // precision on the small-scale parameters; these values are tuned
+    // for float32 cancellation error near optimum.
+    constexpr float kFdEps[8] = {
+        1e-4f, 1e-4f, 1e-4f,  // center (m)
+        1e-4f, 1e-4f, 1e-4f,  // rotation axis-angle (rad)
+        1e-4f, 1e-4f,         // b_yaw, b_pitch (rad)
+    };
 
     float damping = 1e-3f;
     for (int iteration = 0; iteration < 30; ++iteration) {
@@ -499,13 +536,19 @@ bool gauss_newton_optimize(
 
         std::vector<float> jacobian(residual_count * static_cast<std::size_t>(parameter_count), 0.0f);
         for (int param = 0; param < parameter_count; ++param) {
-            std::vector<float> delta(parameter_count, 0.0f);
-            delta[param] = kFiniteDifferenceEps;
-            const State plus_state = apply_delta(*state, delta, optimize_bias);
-            const std::vector<float> plus_residuals = build_residuals(observations, display, plus_state, bias_reg_weight, prior);
+            const float eps = kFdEps[param];
+            std::vector<float> plus_delta(parameter_count, 0.0f);
+            std::vector<float> minus_delta(parameter_count, 0.0f);
+            plus_delta[param] = eps;
+            minus_delta[param] = -eps;
+            const State plus_state = apply_delta(*state, plus_delta, optimize_bias);
+            const State minus_state = apply_delta(*state, minus_delta, optimize_bias);
+            const auto plus_residuals = build_residuals(observations, display, plus_state, bias_reg_weight, prior);
+            const auto minus_residuals = build_residuals(observations, display, minus_state, bias_reg_weight, prior);
+            const float inv_two_eps = 1.0f / (2.0f * eps);
             for (std::size_t row = 0; row < residual_count; ++row) {
                 jacobian[row * static_cast<std::size_t>(parameter_count) + static_cast<std::size_t>(param)] =
-                    (plus_residuals[row] - residuals[row]) / kFiniteDifferenceEps;
+                    (plus_residuals[row] - minus_residuals[row]) * inv_two_eps;
             }
         }
 
@@ -522,8 +565,13 @@ bool gauss_newton_optimize(
                 }
             }
         }
+        // Marquardt scaling: damp each parameter proportionally to its own
+        // diagonal, so parameters with different natural scales (position m
+        // vs angle rad) are regularised consistently.
         for (int i = 0; i < parameter_count; ++i) {
-            jt_j[static_cast<std::size_t>(i * parameter_count + i)] += damping;
+            const std::size_t idx = static_cast<std::size_t>(i * parameter_count + i);
+            const float diag = jt_j[idx];
+            jt_j[idx] = diag + damping * std::max(diag, 1e-9f);
             jt_r[static_cast<std::size_t>(i)] = -jt_r[static_cast<std::size_t>(i)];
         }
 
@@ -532,12 +580,12 @@ bool gauss_newton_optimize(
             return false;
         }
 
-        float step_norm = 0.0f;
-        for (float value : step) {
-            step_norm += value * value;
-        }
-        step_norm = std::sqrt(step_norm);
-        if (step_norm < 1e-6f) {
+        const float pos_step2 = step[0] * step[0] + step[1] * step[1] + step[2] * step[2];
+        const float rot_step2 = step[3] * step[3] + step[4] * step[4] + step[5] * step[5];
+        const float bias_step2 = optimize_bias ? (step[6] * step[6] + step[7] * step[7]) : 0.0f;
+        if (std::sqrt(pos_step2) < kPosConvergence &&
+            std::sqrt(rot_step2) < kRotConvergence &&
+            std::sqrt(bias_step2) < kBiasConvergence) {
             return true;
         }
 
@@ -590,8 +638,13 @@ Vec3 estimate_up_from_observations(const std::vector<Observation>& observations,
                     std::fabs(obs.target_uv.x - other.target_uv.x) < 0.1f) {
                     const Vec3 d_top = normalized(make_vec3(obs.sample.gaze_dir_p));
                     const Vec3 d_bot = normalized(make_vec3(other.sample.gaze_dir_p));
-                    sum_delta = sum_delta + (d_top - d_bot);
-                    ++count;
+                    // Normalise each pair before averaging so long / short
+                    // eye-to-target baselines contribute equally.
+                    const Vec3 delta = d_top - d_bot;
+                    if (norm(delta) > 1e-4f) {
+                        sum_delta = sum_delta + normalized(delta);
+                        ++count;
+                    }
                 }
             }
         }
@@ -734,10 +787,7 @@ State load_state_from_calibration(const gaze_calibration_t& calibration) {
             calibration.T_provider_from_screen[13],
             calibration.T_provider_from_screen[14],
         },
-        calibration.yaw_bias_rad,
-        calibration.pitch_bias_rad,
-        calibration.yaw_gain,
-        calibration.pitch_gain,
+        from_c_tangent_affine(calibration.no_glasses),
     };
 }
 
@@ -748,14 +798,14 @@ void fill_calibration(
     uint32_t sample_count,
     gaze_calibration_t* out_calibration
 ) {
-    out_calibration->version = 1.0f;
+    out_calibration->version = 2.0f;
     out_calibration->screen_width_mm = display.screen_width_mm;
     out_calibration->screen_height_mm = display.screen_height_mm;
     store_transform(state, out_calibration->T_provider_from_screen);
-    out_calibration->yaw_bias_rad = state.yaw_bias;
-    out_calibration->pitch_bias_rad = state.pitch_bias;
-    out_calibration->yaw_gain = state.yaw_gain;
-    out_calibration->pitch_gain = state.pitch_gain;
+    out_calibration->no_glasses = to_c_tangent_affine(state.face_correction);
+    out_calibration->glasses = to_c_tangent_affine(TangentAffine::identity());
+    out_calibration->has_glasses = 0u;
+    out_calibration->active_state = GAZE_STATE_NO_GLASSES;
     std::fill(std::begin(out_calibration->residual_u), std::end(out_calibration->residual_u), 0.0f);
     std::fill(std::begin(out_calibration->residual_v), std::end(out_calibration->residual_v), 0.0f);
     out_calibration->rmse_px = stats.rmse_px;
@@ -806,6 +856,10 @@ struct gaze_cal_session {
     gaze_cal_mode_t mode = GAZE_CAL_MODE_FULL;
     std::unordered_map<uint32_t, Vec2> targets;
     std::vector<Observation> observations;
+    // Only used by GAZE_CAL_MODE_GLASSES: the frozen no-glasses baseline.
+    // Mode is still owned by `mode`; this field is just the snapshot.
+    gaze_calibration_t baseline_calibration{};
+    bool has_baseline = false;
 };
 
 const char* gaze_get_version_string(void) {
@@ -996,6 +1050,141 @@ int gaze_cal_solve(gaze_cal_session_t* session, gaze_calibration_t* out_calibrat
     return GAZE_OK;
 }
 
+gaze_cal_session_t* gaze_cal_begin_glasses(
+    const gaze_display_desc_t* display,
+    const gaze_calibration_t* baseline_no_glasses
+) {
+    if (!valid_display(display) || baseline_no_glasses == nullptr) {
+        return nullptr;
+    }
+    auto* session = new gaze_cal_session_t();
+    session->display = *display;
+    session->mode = GAZE_CAL_MODE_GLASSES;
+    session->baseline_calibration = *baseline_no_glasses;
+    session->has_baseline = true;
+    return session;
+}
+
+int gaze_cal_solve_glasses(gaze_cal_session_t* session, gaze_calibration_t* out_calibration) {
+    if (session == nullptr || out_calibration == nullptr) {
+        return GAZE_ERROR_INVALID_ARGUMENT;
+    }
+    if (session->mode != GAZE_CAL_MODE_GLASSES || !session->has_baseline) {
+        return GAZE_ERROR_MISSING_BASELINE;
+    }
+    if (session->observations.size() < 4) {
+        return GAZE_ERROR_NOT_ENOUGH_DATA;
+    }
+
+    // Freeze pose from baseline; fit only the glasses tangent-affine (G_g, b_g)
+    // to map raw ARKit tangent -> expected tangent in face frame. This is a
+    // 2 x (N linear-least-squares) problem: the yaw and pitch axes are
+    // independent given fixed screen pose.
+    const State base_state = load_state_from_calibration(session->baseline_calibration);
+
+    const std::size_t n = session->observations.size();
+    std::vector<std::array<float, 3>> A;
+    std::vector<float> y_yaw;
+    std::vector<float> y_pitch;
+    A.reserve(n);
+    y_yaw.reserve(n);
+    y_pitch.reserve(n);
+
+    for (const auto& obs : session->observations) {
+        const Vec3 origin = make_vec3(obs.sample.gaze_origin_p_m);
+        const Vec3 raw_dir = make_vec3(obs.sample.gaze_dir_p);
+        const Mat3 R_pf = head_rotation_from_sample(obs.sample);
+        const Mat3 R_fp = transpose(R_pf);
+        const Vec3 raw_face = mul(R_fp, normalized(raw_dir));
+        const Vec2 raw_t = tangent_from_direction(raw_face);
+
+        const Vec3 target = screen_point_to_provider(session->display, base_state.rotation, base_state.center, obs.target_uv);
+        const Vec3 expected_dir = normalized(target - origin);
+        const Vec3 exp_face = mul(R_fp, expected_dir);
+        const Vec2 exp_t = tangent_from_direction(exp_face);
+
+        A.push_back({raw_t.x, raw_t.y, 1.0f});
+        y_yaw.push_back(exp_t.x);
+        y_pitch.push_back(exp_t.y);
+    }
+
+    // Ridge-regularised normal equations with prior mean at identity:
+    //   yaw axis:   prior = [1, 0, 0]   (G_yy=1, G_yp=0, b_yaw=0)
+    //   pitch axis: prior = [0, 1, 0]   (G_py=0, G_pp=1, b_pitch=0)
+    // The small regulariser keeps the solver stable when the user only
+    // samples near-frontal head poses (low head-rotation diversity).
+    constexpr float kLambda = 0.01f;
+    float ATA[9] = {0.0f};
+    float ATy_yaw[3] = {0.0f};
+    float ATy_pitch[3] = {0.0f};
+    for (std::size_t k = 0; k < n; ++k) {
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                ATA[i * 3 + j] += A[k][i] * A[k][j];
+            }
+            ATy_yaw[i] += A[k][i] * y_yaw[k];
+            ATy_pitch[i] += A[k][i] * y_pitch[k];
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        ATA[i * 3 + i] += kLambda;
+    }
+    ATy_yaw[0]   += kLambda * 1.0f;
+    ATy_pitch[1] += kLambda * 1.0f;
+
+    std::vector<float> mat_yaw(ATA, ATA + 9);
+    std::vector<float> rhs_yaw(ATy_yaw, ATy_yaw + 3);
+    std::vector<float> x_yaw;
+    if (!solve_linear_system(mat_yaw, rhs_yaw, 3, &x_yaw)) {
+        return GAZE_ERROR_NUMERIC_FAILURE;
+    }
+    std::vector<float> mat_pitch(ATA, ATA + 9);
+    std::vector<float> rhs_pitch(ATy_pitch, ATy_pitch + 3);
+    std::vector<float> x_pitch;
+    if (!solve_linear_system(mat_pitch, rhs_pitch, 3, &x_pitch)) {
+        return GAZE_ERROR_NUMERIC_FAILURE;
+    }
+
+    TangentAffine glasses{};
+    glasses.G_yy = x_yaw[0];
+    glasses.G_yp = x_yaw[1];
+    glasses.b_yaw = x_yaw[2];
+    glasses.G_py = x_pitch[0];
+    glasses.G_pp = x_pitch[1];
+    glasses.b_pitch = x_pitch[2];
+
+    gaze_calibration_t calibration = session->baseline_calibration;
+    calibration.glasses = to_c_tangent_affine(glasses);
+    calibration.has_glasses = 1u;
+    calibration.active_state = GAZE_STATE_GLASSES;
+    calibration.sample_count = static_cast<uint32_t>(n);
+
+    const SolveStats stats = compute_solve_stats(session->observations, calibration, session->display);
+    calibration.rmse_px = stats.rmse_px;
+    calibration.median_err_px = stats.median_err_px;
+
+    *out_calibration = calibration;
+
+    if (stats.rmse_px > kCalibrationQualityRmsePxThreshold) {
+        return GAZE_ERROR_CALIBRATION_QUALITY;
+    }
+    return GAZE_OK;
+}
+
+int gaze_set_active_state(gaze_calibration_t* calibration, uint32_t state) {
+    if (calibration == nullptr) {
+        return GAZE_ERROR_INVALID_ARGUMENT;
+    }
+    if (state != GAZE_STATE_NO_GLASSES && state != GAZE_STATE_GLASSES) {
+        return GAZE_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == GAZE_STATE_GLASSES && calibration->has_glasses == 0u) {
+        return GAZE_ERROR_MISSING_BASELINE;
+    }
+    calibration->active_state = state;
+    return GAZE_OK;
+}
+
 int gaze_solve_point(
     const gaze_provider_sample_t* sample,
     const gaze_calibration_t* calibration,
@@ -1012,12 +1201,11 @@ int gaze_solve_point(
     const Vec3 origin = make_vec3(sample->gaze_origin_p_m);
     const Vec3 raw_dir = make_vec3(sample->gaze_dir_p);
     const Mat3 R_pf = head_rotation_from_sample(*sample);
-    const Vec3 direction = bias_correct_direction(
-        raw_dir,
-        calibration->yaw_bias_rad, calibration->pitch_bias_rad,
-        calibration->yaw_gain, calibration->pitch_gain,
-        R_pf
-    );
+    const TangentAffine face_correction =
+        (calibration->active_state == GAZE_STATE_GLASSES && calibration->has_glasses != 0u)
+            ? from_c_tangent_affine(calibration->glasses)
+            : from_c_tangent_affine(calibration->no_glasses);
+    const Vec3 direction = correct_gaze_direction(raw_dir, face_correction, R_pf);
 
     Vec3 hit{};
     float plane_distance = 0.0f;
@@ -1109,10 +1297,12 @@ int gaze_refit_pose(
     fill_calibration(state, *display, SolveStats{}, static_cast<uint32_t>(observation_count), &calibration);
     const SolveStats stats = compute_solve_stats(packed, calibration, *display);
     fill_calibration(state, *display, stats, static_cast<uint32_t>(observation_count), &calibration);
-    calibration.yaw_bias_rad = base_calibration->yaw_bias_rad;
-    calibration.pitch_bias_rad = base_calibration->pitch_bias_rad;
-    calibration.yaw_gain = base_calibration->yaw_gain;
-    calibration.pitch_gain = base_calibration->pitch_gain;
+    // Quick-refit only adjusts pose; preserve the face-frame correction and
+    // residual map from the baseline calibration.
+    calibration.no_glasses = base_calibration->no_glasses;
+    calibration.glasses = base_calibration->glasses;
+    calibration.has_glasses = base_calibration->has_glasses;
+    calibration.active_state = base_calibration->active_state;
     std::copy(
         std::begin(base_calibration->residual_u),
         std::end(base_calibration->residual_u),
@@ -1128,8 +1318,32 @@ int gaze_refit_pose(
 }
 
 size_t gaze_calibration_blob_size(void) {
-    constexpr size_t kFloatFieldCount = 37u;
-    return 4u + 4u + (kFloatFieldCount * sizeof(float)) + sizeof(uint32_t);
+    // version, screen_w, screen_h, T[16], no_glasses[6], glasses[6],
+    // residual_u[6], residual_v[6], rmse, median = 45 floats.
+    // has_glasses, active_state, sample_count = 3 u32s.
+    constexpr size_t kFloatFieldCount = 45u;
+    constexpr size_t kU32FieldCount = 3u;
+    return 4u + 4u + (kFloatFieldCount * sizeof(float)) + (kU32FieldCount * sizeof(uint32_t));
+}
+
+void write_tangent_affine(uint8_t* bytes, size_t& offset, const gaze_tangent_affine_t& t) {
+    write_f32_le(bytes, offset, t.G_yy); offset += 4u;
+    write_f32_le(bytes, offset, t.G_yp); offset += 4u;
+    write_f32_le(bytes, offset, t.G_py); offset += 4u;
+    write_f32_le(bytes, offset, t.G_pp); offset += 4u;
+    write_f32_le(bytes, offset, t.b_yaw); offset += 4u;
+    write_f32_le(bytes, offset, t.b_pitch); offset += 4u;
+}
+
+gaze_tangent_affine_t read_tangent_affine(const uint8_t* bytes, size_t& offset) {
+    gaze_tangent_affine_t t{};
+    t.G_yy = read_f32_le(bytes, offset); offset += 4u;
+    t.G_yp = read_f32_le(bytes, offset); offset += 4u;
+    t.G_py = read_f32_le(bytes, offset); offset += 4u;
+    t.G_pp = read_f32_le(bytes, offset); offset += 4u;
+    t.b_yaw = read_f32_le(bytes, offset); offset += 4u;
+    t.b_pitch = read_f32_le(bytes, offset); offset += 4u;
+    return t;
 }
 
 int gaze_calibration_serialize(
@@ -1159,13 +1373,11 @@ int gaze_calibration_serialize(
         write_f32_le(bytes, offset, value);
         offset += 4u;
     }
-    write_f32_le(bytes, offset, calibration->yaw_bias_rad);
+    write_tangent_affine(bytes, offset, calibration->no_glasses);
+    write_tangent_affine(bytes, offset, calibration->glasses);
+    write_u32_le(bytes, offset, calibration->has_glasses);
     offset += 4u;
-    write_f32_le(bytes, offset, calibration->pitch_bias_rad);
-    offset += 4u;
-    write_f32_le(bytes, offset, calibration->yaw_gain);
-    offset += 4u;
-    write_f32_le(bytes, offset, calibration->pitch_gain);
+    write_u32_le(bytes, offset, calibration->active_state);
     offset += 4u;
     for (float value : calibration->residual_u) {
         write_f32_le(bytes, offset, value);
@@ -1215,13 +1427,11 @@ int gaze_calibration_deserialize(
         value = read_f32_le(bytes, offset);
         offset += 4u;
     }
-    calibration.yaw_bias_rad = read_f32_le(bytes, offset);
+    calibration.no_glasses = read_tangent_affine(bytes, offset);
+    calibration.glasses = read_tangent_affine(bytes, offset);
+    calibration.has_glasses = read_u32_le(bytes, offset);
     offset += 4u;
-    calibration.pitch_bias_rad = read_f32_le(bytes, offset);
-    offset += 4u;
-    calibration.yaw_gain = read_f32_le(bytes, offset);
-    offset += 4u;
-    calibration.pitch_gain = read_f32_le(bytes, offset);
+    calibration.active_state = read_u32_le(bytes, offset);
     offset += 4u;
     for (float& value : calibration.residual_u) {
         value = read_f32_le(bytes, offset);
