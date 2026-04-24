@@ -110,10 +110,10 @@ extension Data {
         guard offset + length <= count else {
             throw WireProtocolError.badPayload
         }
-        return self.subdata(in: offset..<(offset + length)).withUnsafeBytes { rawBuffer in
-            let value = rawBuffer.load(as: T.self)
-            return T(littleEndian: value)
+        let value = withUnsafeBytes { rawBuffer in
+            rawBuffer.loadUnaligned(fromByteOffset: offset, as: T.self)
         }
+        return T(littleEndian: value)
     }
 
     func readFloat(at offset: Int) throws -> Float {

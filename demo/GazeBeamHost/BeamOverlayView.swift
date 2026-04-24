@@ -8,7 +8,7 @@ struct BeamOverlayRootView: View {
     private let edgeColor = Color.white.opacity(0.92)
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { _ in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { _ in
             Canvas { context, _ in
                 let snapshot = model.snapshot()
                 if let calibrationTarget = model.calibrationTarget {
@@ -143,7 +143,7 @@ struct BeamOverlayRootView: View {
     ) -> [CGPoint] {
         let normalizedStart = normalize(startAngle - referenceAngle)
         let normalizedEnd = normalize(endAngle - referenceAngle)
-        let steps = 24
+        let steps = 12
 
         let sampledAngles: [CGFloat]
         if normalizedStart >= normalizedEnd {

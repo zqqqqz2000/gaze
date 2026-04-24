@@ -32,8 +32,12 @@ public struct WireEnvelopeStreamDecoder: Sendable {
             return nil
         }
 
-        let frame = buffer.prefix(frameLength)
+        guard let channel = WireChannel(rawValue: buffer[6]) else {
+            throw WireProtocolError.badChannel
+        }
+        let kind = buffer[7]
+        let payload = buffer.subdata(in: WireEnvelope.headerLength..<frameLength)
         buffer.removeSubrange(..<frameLength)
-        return try WireEnvelope.decode(Data(frame))
+        return WireEnvelope(channel: channel, kind: kind, payload: payload)
     }
 }

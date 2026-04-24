@@ -12,6 +12,7 @@ struct BeamSnapshot {
 @MainActor
 final class BeamOverlayModel: ObservableObject {
     private let transitionSpeed: CGFloat = 1600
+    private let minNotifyInterval: CFTimeInterval = 1.0 / 60.0
 
     var baseRadius: CGFloat = 88 {
         didSet {
@@ -26,6 +27,7 @@ final class BeamOverlayModel: ObservableObject {
 
     private var settledPoint: CGPoint?
     private var transition: BeamTransition?
+    private var lastNotifyTime: CFTimeInterval = 0
 
     func setTarget(_ point: CGPoint, at time: CFTimeInterval = CACurrentMediaTime()) {
         let livePoint = resolvedLeadPoint(at: time) ?? point
@@ -34,7 +36,7 @@ final class BeamOverlayModel: ObservableObject {
         let distance = livePoint.distance(to: point)
         guard distance >= 1 else {
             transition = nil
-            objectWillChange.send()
+            notifyIfNeeded(at: time)
             return
         }
 
@@ -45,10 +47,13 @@ final class BeamOverlayModel: ObservableObject {
             duration: max(Double(1.0 / 120.0), Double(distance / transitionSpeed)),
             trailStartRadius: baseRadius
         )
-        objectWillChange.send()
+        notifyIfNeeded(at: time)
     }
 
     func clearTarget() {
+        guard settledPoint != nil || transition != nil else {
+            return
+        }
         settledPoint = nil
         transition = nil
         objectWillChange.send()
@@ -91,6 +96,14 @@ final class BeamOverlayModel: ObservableObject {
 
     func setCalibrationTarget(_ point: CGPoint?) {
         calibrationTarget = point
+    }
+
+    private func notifyIfNeeded(at time: CFTimeInterval) {
+        guard time - lastNotifyTime >= minNotifyInterval else {
+            return
+        }
+        lastNotifyTime = time
+        objectWillChange.send()
     }
 }
 

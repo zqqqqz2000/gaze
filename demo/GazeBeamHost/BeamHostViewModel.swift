@@ -61,6 +61,16 @@ final class BeamHostViewModel: ObservableObject {
     private var usbClient: ProviderSampleClient?
     private var usbReconnectTask: Task<Void, Never>?
     private var shouldMaintainUSBConnection = false
+    private var displayContext: DisplayContext?
+    private var screenObserver: NSObjectProtocol?
+    private var receivedSampleCount = 0
+    private var lastLiveStatusPublishTime: CFTimeInterval = 0
+    private let liveStatusPublishInterval: CFTimeInterval = 1.0 / 12.0
+    private let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     init() {
         overlayModel.baseRadius = CGFloat(beamSize)
@@ -76,6 +86,16 @@ final class BeamHostViewModel: ObservableObject {
                 self?.handleUSBBridgeEvent(event)
             }
         }
+
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshDisplayContext()
+            }
+        }
     }
 
     func startIfNeeded() {
@@ -85,6 +105,7 @@ final class BeamHostViewModel: ObservableObject {
         didStart = true
         localAddresses = LocalIPAddressProvider.ipv4Addresses()
         refreshUSBAvailability()
+        refreshDisplayContext()
         overlayController.show()
         appendLog("host log file: \(logFilePath)")
 
@@ -235,20 +256,28 @@ final class BeamHostViewModel: ObservableObject {
     }
 
     private func consume(sample: ProviderSamplePayload) {
-        sampleCount += 1
-        confidenceText = String(format: "%.2f", sample.confidence)
+        receivedSampleCount += 1
+        let now = CACurrentMediaTime()
+        let shouldPublishLiveStatus = shouldPublishLiveStatus(at: now)
+        if shouldPublishLiveStatus {
+            sampleCount = receivedSampleCount
+            confidenceText = String(format: "%.2f", sample.confidence)
+        }
         collectCalibrationSampleIfNeeded(sample: sample)
 
         guard let mappedPoint = mapToScreen(sample: sample) else {
-            pointText = "-"
+            if shouldPublishLiveStatus {
+                pointText = "-"
+            }
             overlayModel.clearTarget()
             return
         }
 
-        pointText = mappedPoint.debugDescription
+        if shouldPublishLiveStatus {
+            pointText = mappedPoint.debugDescription
+        }
 
         if sample.confidence >= 0.35 && sample.trackingFlags == 1 {
-            let now = CACurrentMediaTime()
             if now - lastFilteredTime > 0.5 {
                 gazeFilterX.reset()
                 gazeFilterY.reset()
@@ -256,19 +285,31 @@ final class BeamHostViewModel: ObservableObject {
             let smoothX = gazeFilterX.filter(value: Double(mappedPoint.point.x), timestamp: now)
             let smoothY = gazeFilterY.filter(value: Double(mappedPoint.point.y), timestamp: now)
             lastFilteredTime = now
-            overlayModel.setTarget(CGPoint(x: smoothX, y: smoothY))
+            overlayModel.setTarget(CGPoint(x: smoothX, y: smoothY), at: now)
         } else {
             overlayModel.clearTarget()
         }
 
-        if sampleCount == 1 {
+        if receivedSampleCount == 1 {
             appendLog("first streamed sample received")
         }
-        if sampleCount == 1 || sampleCount.isMultiple(of: 300) {
+        if receivedSampleCount == 1 || receivedSampleCount.isMultiple(of: 300) {
             logPeriodicSampleDiagnostic(sample: sample, mapped: mappedPoint)
         }
         logDiagnosticSampleIfActive(sample: sample, mapped: mappedPoint)
         detectPositionJump(mappedPoint.point)
+    }
+
+    private func shouldPublishLiveStatus(at time: CFTimeInterval) -> Bool {
+        guard receivedSampleCount != 1 else {
+            lastLiveStatusPublishTime = time
+            return true
+        }
+        guard time - lastLiveStatusPublishTime >= liveStatusPublishInterval else {
+            return false
+        }
+        lastLiveStatusPublishTime = time
+        return true
     }
 
     private var lastLoggedPoint: CGPoint?
@@ -305,7 +346,7 @@ final class BeamHostViewModel: ObservableObject {
         let d = sample.gazeDirP
         let h = sample.headPosPM
         let r = sample.headRotPFQ
-        appendLog("sample#\(sampleCount): "
+        appendLog("sample#\(receivedSampleCount): "
             + "origin=(\(o.map { String(format: "%.4f", $0) }.joined(separator: ","))) "
             + "dir=(\(d.map { String(format: "%.4f", $0) }.joined(separator: ","))) "
             + "conf=\(String(format: "%.2f", sample.confidence)) "
@@ -832,7 +873,7 @@ final class BeamHostViewModel: ObservableObject {
     private var solveFailureCount = 0
 
     private func mapToScreen(sample: ProviderSamplePayload) -> MappedPoint? {
-        guard let displayContext = makeDisplayContext() else {
+        guard let displayContext = currentDisplayContext() else {
             updateRuntimeStatus("screen metrics unavailable")
             return nil
         }
@@ -863,14 +904,10 @@ final class BeamHostViewModel: ObservableObject {
                 let point = screenPoint(fromNormalized: CGPoint(x: clampedU, y: clampedV), in: displayContext.frame)
                 return MappedPoint(
                     point: point,
-                    debugDescription: String(
-                        format: "%.0f, %.0f | u=%.3f v=%.3f%@",
-                        point.x,
-                        point.y,
-                        solvedPoint.u,
-                        solvedPoint.v,
-                        solvedPoint.insideScreen ? "" : " edge"
-                    )
+                    rawU: solvedPoint.u,
+                    rawV: solvedPoint.v,
+                    isInsideScreen: solvedPoint.insideScreen,
+                    mode: .core
                 )
             } catch {
                 solveFailureCount += 1
@@ -892,17 +929,20 @@ final class BeamHostViewModel: ObservableObject {
         let fallbackPoint = uncalibratedMapper.map(sample: sample, in: displayContext.frame)
         return MappedPoint(
             point: fallbackPoint,
-            debugDescription: String(format: "%.0f, %.0f | heuristic", fallbackPoint.x, fallbackPoint.y)
+            rawU: nil,
+            rawV: nil,
+            isInsideScreen: true,
+            mode: .heuristic
         )
     }
 
     private var throttleTimestamps: [String: CFTimeInterval] = [:]
 
-    private func logThrottled(key: String, interval: CFTimeInterval, _ message: String) {
+    private func logThrottled(key: String, interval: CFTimeInterval, _ message: @autoclosure () -> String) {
         let now = CACurrentMediaTime()
         if let last = throttleTimestamps[key], now - last < interval { return }
         throttleTimestamps[key] = now
-        appendLog(message)
+        appendLog(message())
     }
 
     private func screenPoint(fromNormalized normalizedPoint: CGPoint, in frame: CGRect) -> CGPoint {
@@ -928,9 +968,7 @@ final class BeamHostViewModel: ObservableObject {
     }
 
     private func timestampString(for date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        timestampFormatter.string(from: date)
     }
 
     private func restoreCalibrationIfAvailable() {
@@ -1008,7 +1046,7 @@ final class BeamHostViewModel: ObservableObject {
             appendLog("  T[\(row)]=[\(cols.joined(separator: ", "))]")
         }
 
-        if let ctx = makeDisplayContext() {
+        if let ctx = currentDisplayContext() {
             let desc = ctx.descriptor
             if abs(cal.screenWidthMM - desc.screenWidthMM) > 1 || abs(cal.screenHeightMM - desc.screenHeightMM) > 1 {
                 appendLog("WARNING: calibration screen size (\(String(format: "%.1f", cal.screenWidthMM))x"
@@ -1016,6 +1054,18 @@ final class BeamHostViewModel: ObservableObject {
                     + "(\(String(format: "%.1f", desc.screenWidthMM))x\(String(format: "%.1f", desc.screenHeightMM))mm)")
             }
         }
+    }
+
+    private func refreshDisplayContext() {
+        displayContext = makeDisplayContext()
+    }
+
+    private func currentDisplayContext() -> DisplayContext? {
+        if let displayContext {
+            return displayContext
+        }
+        refreshDisplayContext()
+        return displayContext
     }
 
     private func makeDisplayContext() -> DisplayContext? {
@@ -1094,7 +1144,34 @@ private struct CalibrationPointDigest {
 
 private struct MappedPoint {
     let point: CGPoint
-    let debugDescription: String
+    let rawU: Float?
+    let rawV: Float?
+    let isInsideScreen: Bool
+    let mode: MappedPointMode
+
+    var debugDescription: String {
+        switch mode {
+        case .core:
+            guard let rawU, let rawV else {
+                return String(format: "%.0f, %.0f | core", point.x, point.y)
+            }
+            return String(
+                format: "%.0f, %.0f | u=%.3f v=%.3f%@",
+                point.x,
+                point.y,
+                rawU,
+                rawV,
+                isInsideScreen ? "" : " edge"
+            )
+        case .heuristic:
+            return String(format: "%.0f, %.0f | heuristic", point.x, point.y)
+        }
+    }
+}
+
+private enum MappedPointMode {
+    case core
+    case heuristic
 }
 
 private final class LowPassFilter {
