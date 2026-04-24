@@ -2,6 +2,8 @@
 
 # 👀 Gaze SDK
 
+![Gaze SDK hero](assets/gaze-sdk-hero.png)
+
 **Language:** [English](#english) | [中文](#中文)
 
 Gaze SDK turns an iPhone with ARKit face tracking into a gaze input source and maps it onto a screen. It provides ARKit gaze sampling, screen calibration, real-time gaze-to-screen solving, bare-eye and glasses correction, quick refit, residual correction, binary calibration storage, and stream protocol tooling. It supports Swift, Rust, Python, and TypeScript SDKs, plus a C/C++ core ABI for native integrations.
