@@ -1,9 +1,10 @@
 # Gaze Demo Apps
 
-`demo/` 里现在有两端：
+`demo/` 里现在有三端：
 
 - `GazeDemoApp`：iPhone 真机 provider，负责采集 `ARKit` gaze sample 并推流
 - `GazeBeamHost`：macOS host，负责接收 sample、做 9 点校准，并在屏幕最上层渲染 gaze overlay
+- `windows/GazeWinHost`：Windows host，负责接收 LAN sample，并渲染和 macOS 风格一致的透明 beam overlay
 
 ## 打开方式
 
@@ -21,6 +22,14 @@ demo/GazeDemoApp.xcodeproj
 ```
 
 工程通过本地 package 依赖当前仓库根目录。
+
+Windows host 使用 CMake 构建：
+
+```powershell
+cd demo/windows
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
 
 ## 运行要求
 
@@ -55,6 +64,15 @@ demo/GazeDemoApp.xcodeproj
 - overlay 不抢焦点，鼠标事件直接穿透
 - 9 点校准
 - 自动保存上一次成功的校准参数，并在下次启动时恢复
+
+### Windows Host
+
+- 监听 `9000` 端口接收 iPhone LAN sample
+- 在屏幕最上层渲染半透明 beam overlay
+- overlay 不抢焦点，鼠标事件直接穿透
+- 60 Hz beam 动画，包含 glow、lead circle 和 trail transition
+- 当前使用和 macOS fallback 一致的 `lookAtPointFM` 启发式映射
+- 周期性输出 confidence、face distance 和屏幕点诊断
 
 ## 端到端校准步骤
 
