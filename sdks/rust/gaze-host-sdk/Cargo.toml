@@ -1,0 +1,10 @@
+[package]
+name = "gaze-host-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side Gaze SDK protocol codec for Rust"
+license = "MIT"
+
+[lib]
+name = "gaze_host_sdk"
+path = "src/lib.rs"
